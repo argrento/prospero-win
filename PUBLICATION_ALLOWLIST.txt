@@ -194,6 +194,7 @@ tools/build_wowprospero.sh
 tools/run_wine_dbt_host.sh
 tests/test_build_wine_ps5.py
 tools/build_wine_ps5.sh
+tools/check_server_protocol.py
 tools/link_radv_prx.sh
 tools/gen_prx_descriptor.py
 tests/test_gen_prx_descriptor.py
@@ -461,6 +462,7 @@ tests/wine_file_handles.c
 tests/test_wine_written_files.py
 tests/wine_written_files.c
 tests/test_wine_request_order.py
+tests/test_check_server_protocol.py
 tests/test_wine_fiber_stacks.py
 tests/wine_fiber_stacks.c
 tests/test_d3d12_control.py

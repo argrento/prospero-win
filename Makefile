@@ -231,6 +231,7 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	python3 tests/test_wine_file_handles.py
 	python3 tests/test_wine_written_files.py
 	python3 tests/test_wine_request_order.py
+	python3 tests/test_check_server_protocol.py
 	python3 tests/test_wine_directory_watch.py
 	python3 tests/test_wine_commit_limit.py
 	python3 tests/test_wine_fiber_stacks.py

@@ -99,6 +99,32 @@ reusing objects made with other maps. A build
 after a change that touches a few files recompiles only those. The input
 key records whether ccache was on. Build a release without it.
 
+### Server protocol
+
+A Wine module sends each server request by its number, its place in
+`enum request`, and lays it out as the generated structures say. The
+runtime keeps stock Wine's PE modules that no patch changes, and a kit can
+keep modules of an earlier build, so the patches may only add to the
+protocol. Patch 1021 first added `release_fd_loan` in the middle of
+`server/protocol.def`: kit 0.27 took the new `.prx` modules and kept an
+earlier `ntoskrnl.exe`, which then asked for `get_kernel_object_ptr` by a
+number that now meant another request, and every game crashed at start
+(#894 in Playden).
+
+After the patches are applied, the build runs
+`tools/check_server_protocol.py` on stock Wine's tree and the patched one.
+It stops when the patches renumber a stock request, change, move or drop a
+stock member of a request or reply (its declaration, offset or the size of
+the whole), or change a shared struct or union at all (from the definitions
+and `enum request` in `include/wine/server_protocol.h` and the layout
+assertions in `server/request_handlers.h`). Every line of `enum request`
+must be a request entry. It compares with stock Wine only: a request or
+member that an earlier patch added is protected by
+`tests/test_wine_request_order.py`, not by this check. `tests/test_check_server_protocol.py` covers
+the rules, and `tests/test_wine_request_order.py` reads the patch files
+themselves. Add a new request at the end of `server/protocol.def`, and a
+new field at the end of its request or reply.
+
 ## Patch series
 
 `wine/patches/NNNN-name.patch` files are mail-formatted patches applied with

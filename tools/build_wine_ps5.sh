@@ -412,6 +412,13 @@ for patch in $ordered; do
     git -C "$tree" apply --index "$patches/$patch" || fail "patch does not apply: $patch"
     echo "applied $patch"
 done
+# The runtime keeps stock Wine's PE modules that no patch changes, and a kit
+# can keep modules of an earlier build: they send server requests by the
+# numbers and layouts they were built with, so the patches may only add to
+# stock Wine's protocol (#894: patch 1021 renumbered the requests, and every
+# game crashed in an ntoskrnl.exe built before it).
+python3 "$root/tools/check_server_protocol.py" "$source_dir" "$tree" ||
+    fail "the patches change stock Wine's server protocol"
 
 # Stage Vulkan batching after the complete patch series. Failure must stop the
 # build before either half can be emitted with a different dispatch table.

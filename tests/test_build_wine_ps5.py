@@ -227,6 +227,15 @@ ccache=${{PW_CCACHE:-0}}
         assert key() == ''
 
 
+def check_protocol_step() -> None:
+    # #894: the series is checked against stock Wine's protocol right after it
+    # is applied, before anything compiles.
+    text = SCRIPT.read_text()
+    applied = text.index('git -C "$tree" apply --index "$patches/$patch"')
+    check = text.index('python3 "$root/tools/check_server_protocol.py" "$source_dir" "$tree" ||')
+    assert applied < check < text.index('tools/stage_vk_batch.py'), 'protocol check not right after the patches'
+
+
 def check_input_key_publication() -> None:
     # Execute the real closing stanza: only a complete build (make, report and
     # PRX link all good) writes <work>/input-key; a failed report stops.
@@ -355,6 +364,7 @@ def main() -> int:
     check_vk_runtime_staging()
     check_patched_pe_staging()
     check_input_key()
+    check_protocol_step()
     check_input_key_publication()
     check_ccache_settings()
     check_prx_foundation_gate()
