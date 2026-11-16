@@ -310,8 +310,28 @@ static void filesystem_and_registry_contract(void)
 {
     Fixture f; PwTitlePublicationLease lease; int calls = 0; char mapped[1200], text[32768];
     fixture_init(&f, &calls);
+    /* Opened folders and files of the owner's are admitted (FTP can then delete them); a link is not. */
     path(mapped, sizeof(mapped), &f, "/data/playden/games/install-220/library/profiles");
-    CHECK(chmod(mapped, 0755) == 0); CHECK(admit(&f, &lease) != 0); CHECK(chmod(mapped, 0700) == 0);
+    CHECK(chmod(mapped, 0777) == 0);
+    CHECK(admit(&f, &lease) == 0); pw_title_publication_close(&lease);
+    CHECK(chmod(mapped, 0700) == 0);
+    fixture_refresh(&f);
+    path(mapped, sizeof(mapped), &f, "/data/playden/games/install-220/.playden-control");
+    CHECK(chmod(mapped, 0777) == 0);
+    path(mapped, sizeof(mapped), &f, "/data/playden/games/install-220/library/prefixes/game/user.reg");
+    CHECK(chmod(mapped, 0666) == 0);
+    path(mapped, sizeof(mapped), &f, "/data/homebrew/FAKE78001/game-launch.json");
+    CHECK(chmod(mapped, 0666) == 0);
+    CHECK(admit(&f, &lease) == 0); pw_title_publication_close(&lease);
+    fixture_refresh(&f);
+    {
+        char real[1200], moved[1300];
+        path(real, sizeof(real), &f, "/data/playden/games/install-220/library/input");
+        snprintf(moved, sizeof(moved), "%s.real", real);
+        CHECK(rename(real, moved) == 0 && symlink(moved, real) == 0);
+        CHECK(admit(&f, &lease) != 0);
+        CHECK(unlink(real) == 0 && rename(moved, real) == 0);
+    }
     fixture_refresh(&f);
 
     read_file(&f, "/data/playden/games/install-220/library/prefixes/game/user.reg", text, sizeof(text));
@@ -387,7 +407,9 @@ static void filesystem_and_registry_contract(void)
     CHECK(admit(&f, &lease) == 0); pw_title_publication_close(&lease); fixture_refresh(&f);
 
     path(mapped, sizeof(mapped), &f, "/data/homebrew/FAKE78001/game-launch.json");
-    CHECK(chmod(mapped, 0644) == 0); CHECK(admit(&f, &lease) != 0); CHECK(chmod(mapped, 0600) == 0);
+    /* Any mode of the owner's: the console owner may open it to delete it over FTP. */
+    CHECK(chmod(mapped, 0644) == 0); CHECK(admit(&f, &lease) == 0); pw_title_publication_close(&lease);
+    CHECK(chmod(mapped, 0600) == 0); fixture_refresh(&f);
     PwTitlePublicationPlatform saved = f.platform; f.platform.try_lock_shared = NULL;
     CHECK(admit(&f, &lease) != 0 && lease.lock_fd == -1);
     f.platform.try_lock_shared = unavailable_lock;
@@ -572,7 +594,7 @@ static int metadata_parses(const char *text)
 }
 
 /* A game folder on a filesystem without owners or permissions (exFAT) is
- * admitted only when schema 3 metadata says so; private files stay strict. */
+ * admitted only when schema 3 metadata says so. */
 static void unowned_game_root_contract(void)
 {
     Fixture f; PwTitlePublicationLease lease; int calls = 0;
@@ -603,11 +625,12 @@ static void unowned_game_root_contract(void)
     publish_modified_metadata(&f);
     CHECK(chmod(game, 0777) == 0); CHECK(chmod(dxvk, 0666) == 0);
     CHECK(admit(&f, &lease) == 0); pw_title_publication_close(&lease);
-    /* Still refused: a hard-linked dxvk.conf and a loosened private folder. */
+    /* Still refused: a hard-linked dxvk.conf. An opened launcher folder is admitted. */
     CHECK(snprintf(alias, sizeof(alias), "%s.alias", dxvk) > 0);
     CHECK(link(dxvk, alias) == 0); CHECK(admit(&f, &lease) != 0); CHECK(unlink(alias) == 0);
     path(profiles, sizeof(profiles), &f, "/data/playden/games/install-220/library/profiles");
-    CHECK(chmod(profiles, 0755) == 0); CHECK(admit(&f, &lease) != 0); CHECK(chmod(profiles, 0700) == 0);
+    CHECK(chmod(profiles, 0777) == 0); CHECK(admit(&f, &lease) == 0); pw_title_publication_close(&lease);
+    CHECK(chmod(profiles, 0700) == 0);
     CHECK(admit(&f, &lease) == 0); pw_title_publication_close(&lease);
     CHECK(chmod(game, 0755) == 0);
     fixture_destroy(&f);

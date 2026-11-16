@@ -102,7 +102,7 @@ static void test_playden_lifecycle_is_atomic(void)
         assert(lstat(session.path, &info) == 0);
         assert(info.st_uid == geteuid() && (info.st_mode & 07777) == 0600);
         assert(lstat(session.directory, &info) == 0);
-        assert(info.st_uid == geteuid() && (info.st_mode & 07777) == 0700);
+        assert(info.st_uid == geteuid() && (info.st_mode & 07777) == 0777);  /* FTP can delete it */
     }
     read_text(session.path, text, sizeof(text));
     assert_contains(text, "\"session_id\":\"123e4567-e89b-12d3-a456-426614174000\"");
@@ -436,33 +436,36 @@ static void test_chained_start_keeps_the_session(void)
     assert(pw_title_session_resume(&refused, &launch, argument, error, sizeof(error)) != 0);
 }
 
-static void test_public_session_parents_are_rejected(void)
+/* The launcher keeps its data open so the console owner can delete it over FTP: session folders of the app user's
+ * are accepted at any mode, and the ones the title makes are 0777. */
+static void test_open_session_parents_are_accepted(void)
 {
-    char root[] = "/tmp/pw-title-private-XXXXXX";
-    char logs[512], text[2048], error[512];
+    char root[] = "/tmp/pw-title-open-XXXXXX";
+    char logs[512], sessions[600], text[2048], error[512];
     PwTitleLaunch launch;
     PwTitleSession session;
     struct stat info;
     make_temp_dir(root);
+    assert(chmod(root, 0777) == 0);
     launch = launch_for(root);
     format_path(logs, sizeof(logs), "%s/logs", root);
     assert(mkdir(logs, 0755) == 0);
-    assert(pw_title_session_start(&session, &launch, NULL, error, sizeof(error)) == -1);
-    assert(lstat(logs, &info) == 0 && (info.st_mode & 07777) == 0755);
-    assert(chmod(logs, 0700) == 0);
+    assert(chmod(logs, 0755) == 0);
     assert(pw_title_session_start(&session, &launch, NULL, error, sizeof(error)) == 0);
-    assert(chmod(session.directory, 0755) == 0);
-    assert(pw_title_session_running(&session) == -1);
-    read_text(session.path, text, sizeof(text));
-    assert_contains(text, "\"phase\":\"starting\"");
+    assert(lstat(logs, &info) == 0 && (info.st_mode & 07777) == 0755);
+    format_path(sessions, sizeof(sessions), "%s/sessions", logs);
+    assert(lstat(sessions, &info) == 0 && (info.st_mode & 07777) == 0777);
     assert(chmod(session.directory, 0700) == 0);
+    assert(pw_title_session_running(&session) == 0);
+    read_text(session.path, text, sizeof(text));
+    assert_contains(text, "\"phase\":\"running\"");
     assert(pw_title_session_failed(&session, 0, 0) == 0);
     pw_title_session_close(&session);
 }
 
 int main(void)
 {
-    test_public_session_parents_are_rejected();
+    test_open_session_parents_are_accepted();
     test_chained_start_keeps_the_session();
     test_uuid_validation();
     test_playden_lifecycle_is_atomic();

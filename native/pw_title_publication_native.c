@@ -137,13 +137,19 @@ static int no_symlink_ancestors(const char *path)
     return 1;
 }
 
+/* Any mode: a folder of the owner's that the console owner may have opened (FTP runs as root, which has
+ * no permission bypass on /data, so the launcher keeps its data 0777). Owner, type, links and an
+ * unchanged identity still decide. */
+#define PW_ANY_MODE ((mode_t)-1)
+
 static int checked_directory(const PwTitlePublicationPlatform *platform,
                              const char *console, mode_t wanted, FileIdentity *output)
 {
     char path[PW_TITLE_PUBLICATION_NATIVE_PATH * 2]; struct stat info;
     if (mapped_path(platform, console, path, sizeof(path)) || !no_symlink_ancestors(path) ||
         lstat(path, &info) || !S_ISDIR(info.st_mode) || S_ISLNK(info.st_mode) ||
-        (info.st_mode & 07777) != wanted || info.st_uid != (uid_t)platform->owner_uid) return 0;
+        (wanted != PW_ANY_MODE && (info.st_mode & 07777) != wanted) ||
+        info.st_uid != (uid_t)platform->owner_uid) return 0;
     if (output) *output = identity(&info);
     return 1;
 }
@@ -170,14 +176,18 @@ static int directory_unchanged(const PwTitlePublicationPlatform *platform,
     return checked_directory(platform, console, wanted, &after) && same_identity(before, after);
 }
 
-/* read_regular file policies: private files are 0600; legacy ones may be 0644;
- * a file in an unowned game folder may have any owner and mode. */
-enum { READ_PRIVATE = 0, READ_LEGACY = 1, READ_GAME_UNOWNED = 2 };
+/* read_regular file policies. The launcher's files (READ_PRIVATE: control, profiles, input, metadata, the
+ * descriptor; READ_BOTTLE: the bottle's user.reg) are the owner's with one link, at any mode: every app
+ * on the console runs as the same user, so modes protect nothing there, and the launcher keeps its data
+ * open so the console owner can delete it over FTP. dxvk.conf in an owned game folder (READ_LEGACY) is
+ * 0600 or 0644, as that folder's start check wants. A file in an unowned game folder may have any owner
+ * and mode. */
+enum { READ_PRIVATE = 0, READ_LEGACY = 1, READ_GAME_UNOWNED = 2, READ_BOTTLE = 3 };
 
 static int admitted_mode(mode_t actual, int legacy)
 {
     mode_t permission = actual & 07777;
-    return legacy == READ_GAME_UNOWNED || permission == 0600 || (legacy && permission == 0644);
+    return legacy != READ_LEGACY || permission == 0600 || permission == 0644;
 }
 
 static uint8_t *read_regular(const PwTitlePublicationPlatform *platform, const char *console,
@@ -598,7 +608,7 @@ static int private_tree(const PwTitlePublicationPlatform *platform, const char *
     for (unsigned i = 0; i < 7; ++i) {
         if ((suffix[i][0] ? append_path(paths[i], PW_TITLE_PUBLICATION_NATIVE_PATH, root, suffix[i]) :
                            (strlen(root) < PW_TITLE_PUBLICATION_NATIVE_PATH ? (strcpy(paths[i], root), 0) : -1)) ||
-            !checked_directory(platform, paths[i], 0700, &identities[i])) return 0;
+            !checked_directory(platform, paths[i], PW_ANY_MODE, &identities[i])) return 0;
     }
     return 1;
 }
@@ -607,7 +617,7 @@ static int private_tree_unchanged(const PwTitlePublicationPlatform *platform,
                                   FileIdentity identities[7], char paths[7][PW_TITLE_PUBLICATION_NATIVE_PATH])
 {
     for (unsigned i = 0; i < 7; ++i)
-        if (!directory_unchanged(platform, paths[i], 0700, identities[i])) return 0;
+        if (!directory_unchanged(platform, paths[i], PW_ANY_MODE, identities[i])) return 0;
     return 1;
 }
 
@@ -640,10 +650,10 @@ static int verify_publication(const PwTitlePublicationDescriptor *before,
         append_path(lock_path, sizeof(lock_path), control, "publication.lock") ||
         append_path(receipt_path, sizeof(receipt_path), control, "publication-state.v1"))
         return failure(error, error_size, "invalid publication roots");
-    if (!checked_directory(platform, control, 0700, &control_before) ||
+    if (!checked_directory(platform, control, PW_ANY_MODE, &control_before) ||
         mapped_path(platform, lock_path, host_lock, sizeof(host_lock)) || !no_symlink_ancestors(host_lock) ||
         lstat(host_lock, &info) || !S_ISREG(info.st_mode) || S_ISLNK(info.st_mode) ||
-        info.st_uid != (uid_t)platform->owner_uid || info.st_nlink != 1 || (info.st_mode & 07777) != 0600)
+        info.st_uid != (uid_t)platform->owner_uid || info.st_nlink != 1)
         return failure(error, error_size, "publication lock refused");
     lock_before = identity(&info);
     lock_fd = borrowed_fd >= 0 ? borrowed_fd : open(host_lock, O_RDONLY | O_NOFOLLOW);
@@ -658,7 +668,7 @@ static int verify_publication(const PwTitlePublicationDescriptor *before,
     if (fstat(lock_fd, &info)) goto done; lock_after = identity(&info);
     if (!same_identity(lock_opened, lock_after) || lstat(host_lock, &info) ||
         !same_identity(lock_opened, identity(&info)) ||
-        !checked_directory(platform, control, 0700, &control_after) ||
+        !checked_directory(platform, control, PW_ANY_MODE, &control_after) ||
         !same_identity(control_before, control_after)) goto done;
     if (pw_title_publication_read_descriptor(before->canonical_path, before->launch.title_id,
           platform, &reread, error, error_size) != PW_OK || reread.length != before->length ||
@@ -766,7 +776,7 @@ static int verify_publication(const PwTitlePublicationDescriptor *before,
     }
     if (append_path(user_reg, sizeof(user_reg), prefix_path, "user.reg")) goto done;
     stage = 7;
-    bytes = read_regular(platform, user_reg, USER_REG_MAX, 1, &length);
+    bytes = read_regular(platform, user_reg, USER_REG_MAX, READ_BOTTLE, &length);
     if (!bytes || !registry_semantics(bytes, length, &metadata, &profile)) goto done;
     free(bytes); bytes = NULL;
     stage = 8;

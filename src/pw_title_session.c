@@ -170,11 +170,12 @@ static void reservation_unlock(void)
     __atomic_store_n(&reservation_guard, 0, __ATOMIC_RELEASE);
 }
 
+/* The app user's folder, at any mode: the launcher keeps its data open (0777) so the console owner can
+ * delete it over FTP. */
 static int private_directory_safe(const char *path)
 {
     struct stat st;
-    return directory_safe(path) && lstat(path, &st) == 0 &&
-           st.st_uid == geteuid() && (st.st_mode & 07777) == 0700;
+    return directory_safe(path) && lstat(path, &st) == 0 && st.st_uid == geteuid();
 }
 
 static int private_file_fd(int fd)
@@ -190,13 +191,16 @@ static int ensure_directory(const char *path, const char *parent,
 {
     int created = 0;
 
-    if (mkdir(path, 0700) == 0) created = 1;
+    if (mkdir(path, 0777) == 0) {
+        created = 1;
+        (void)chmod(path, 0777);  /* whatever the umask */
+    }
     else if (errno != EEXIST) {
         set_error(error, error_size, "cannot create %s: %s", path, strerror(errno));
         return -1;
     }
     if (!private_directory_safe(path)) {
-        set_error(error, error_size, "%s directory is not private or app-owned", path);
+        set_error(error, error_size, "%s directory is not app-owned or is a link", path);
         return -1;
     }
     if (created && (!parent || sync_directory(parent) != 0)) {
@@ -329,8 +333,7 @@ int pw_title_session_start(PwTitleSession *session, const PwTitleLaunch *launch,
     }
     session->launch = *launch;
     if (lstat(launch->data_root, &root_stat) != 0 || !S_ISDIR(root_stat.st_mode) ||
-        S_ISLNK(root_stat.st_mode) || root_stat.st_uid != geteuid() ||
-        (root_stat.st_mode & 07777) != 0700) {
+        S_ISLNK(root_stat.st_mode) || root_stat.st_uid != geteuid()) {
         set_error(error, error_size, "data root is unavailable or unsafe");
         goto fail;
     }

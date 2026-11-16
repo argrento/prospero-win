@@ -45,9 +45,10 @@ int pw_data_mount_request_with(const PwDataMountOps *ops, int32_t pid,
     else
         detail->helper_errno = errno ? errno : EIO;
 
-    /* It also leaves the real UID at 0. Wine's server refuses a prefix that
-     * is not owned by the real UID, and private bottles belong to the app
-     * user, so return the real UID too. Do it while the effective UID is
+    /* It also leaves the real UID at 0. Upstream Wine's server refuses a
+     * prefix that is not owned by the real UID; the PS5 build compiles that
+     * check out (wine/patches 0110, 0111, 0580). The real UID is returned
+     * anyway, as the app user's. Do it while the effective UID is
      * still 0: without root, FreeBSD only allows a real UID equal to the
      * current real or saved UID. The saved UID stays as the helper left it. */
     if (getuid() != original_effective_uid &&
