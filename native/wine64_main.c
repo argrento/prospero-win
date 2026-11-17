@@ -48,6 +48,7 @@
 #include "pw_file_limits.h"
 #include "pw_helper_ps5.h"
 #include "pw_audio_ps5.h"
+#include "pw_audio_route.h"
 #include "pw_pad_ps5.h"
 #include "pw_hid_ps5.h"
 #include "pw_osk_ps5.h"
@@ -834,13 +835,51 @@ static int wine_release_display(void *context)
 /* Wine's audio driver (wine/wineps5) mixes every stream a game plays into
  * one grain at a time and hands it to this sink, which plays it on the
  * console's main port. sceAudioOutOutput returns once the port has taken
- * the grain, so the port clocks the driver. */
+ * the grain, so the port clocks the driver.
+ *
+ * Every half second the sink reads the port's state and logs it when it
+ * changes: where the console plays it (TV or headset) and its reroute
+ * counter. [debug] env = PW_AUDIO_ROUTE=headset also opens the foreground
+ * user's personal port and plays there while it reports a headset and the
+ * main port does not (src/pw_audio_route.h); =main-user opens the main port
+ * as that user instead of the system user. Both ports stay open, so a move
+ * is the next grain going to the other one: nothing closes under a grain. */
 _Static_assert(PW_WINE_AUDIO_GRAIN == PW_AUDIO_PS5_GRAIN && PW_WINE_AUDIO_RATE == PW_AUDIO_PS5_RATE,
                "Wine's audio grain is the port's");
 static PwAudioPs5Ops audio_ops;
-static int audio_port = -1;
+static int audio_port = -1, audio_personal = -1;
+static PwAudioRoute audio_route;
 /* Grains played, and those with any sound in them. */
 static volatile unsigned long audio_grains, audio_audible;
+
+static void audio_log_state(const char *name, PwAudioRouteState state, int status,
+                            const PwAudioPs5PortState *raw)
+{
+    const uint8_t *bytes = (const uint8_t *)raw;
+    char hex[2 * 32 + 1];
+
+    for (size_t i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", bytes[i]);
+    PS5LOG_LOG("PW_WINE64 audio %s status=%#x output=%#x reroute=%u raw=%s", name, (unsigned)status,
+               (unsigned)state.output, (unsigned)state.reroute_counter, hex);
+}
+
+static void audio_check_route(void)
+{
+    PwAudioPs5PortState main_raw, personal_raw;
+    int main_status, personal_status = 0;
+    PwAudioRouteState main = pw_audio_ps5_port_state(&audio_ops, audio_port, &main_status, &main_raw);
+    PwAudioRouteState personal = { 0, 0, 0 };
+
+    if (audio_personal >= 0)
+        personal = pw_audio_ps5_port_state(&audio_ops, audio_personal, &personal_status, &personal_raw);
+    int changed = pw_audio_route_update(&audio_route, &main, audio_personal >= 0 ? &personal : NULL);
+    if (!(changed & PW_AUDIO_ROUTE_STATE_CHANGED)) return;
+    audio_log_state("main", main, main_status, &main_raw);
+    if (audio_personal >= 0) audio_log_state("personal", personal, personal_status, &personal_raw);
+    if (changed & PW_AUDIO_ROUTE_PORT_CHANGED)
+        PS5LOG_LOG("PW_WINE64 audio route=%s switches=%u", pw_audio_route_port(&audio_route) ==
+                   PW_AUDIO_ROUTE_PORT_PERSONAL ? "personal" : "main", (unsigned)audio_route.switches);
+}
 
 static int wine_audio(void *context, const int16_t *frames)
 {
@@ -848,7 +887,26 @@ static int wine_audio(void *context, const int16_t *frames)
     audio_grains++;
     for (size_t i = 0; i < 2u * PW_WINE_AUDIO_GRAIN; i++)
         if (frames[i]) { audio_audible++; break; }
+    if (pw_audio_route_due(&audio_route)) audio_check_route();
+    if (pw_audio_route_port(&audio_route) == PW_AUDIO_ROUTE_PORT_PERSONAL) {
+        int status = audio_ops.output(audio_personal, frames);
+        if (status >= 0) return 0;
+        /* back to the main port with this same grain */
+        pw_audio_route_failed(&audio_route);
+        PS5LOG_LOG("PW_WINE64 audio personal refused a grain status=%#x route=main", (unsigned)status);
+    }
     return audio_ops.output(audio_port, frames) < 0 ? -1 : 0;
+}
+
+/* A [debug] env value of the profile, or NULL. */
+static const char *debug_env_value(const PwGameProfile *game, const char *name)
+{
+    PwGameEnv env[PW_GAME_DEBUG_ENV_MAX];
+    size_t count = pw_game_debug_env(game, env);
+
+    for (size_t i = 0; i < count; i++)
+        if (!strcmp(env[i].name, name)) return env[i].value;
+    return NULL;
 }
 
 /* Scale a frame onto the whole screen as the profile asks (fit keeps the
@@ -2605,11 +2663,30 @@ int main(int argc, char **argv)
              * port does not open (status state, measured after eba69f8). Open
              * it under the console's own umask 0, then restore the private one. */
             const int audio_mask = per_game_mode ? pw_title_ps5_umask(0) : -1;
-            if (audio_status == PW_OK) audio_status = pw_audio_ps5_open_port(&audio_ops, &audio_port);
+            const int policy = pw_audio_route_policy(debug_env_value(game, "PW_AUDIO_ROUTE"));
+            const int user = pad_status == PW_OK && pad.user_id >= 0 ? (int)pad.user_id : -1;
+            const int main_user = policy == PW_AUDIO_ROUTE_MAIN_USER && user >= 0 ? user : PW_AUDIO_PS5_USER_SYSTEM;
+            int main_result = 0, personal_result = 0;
+            if (audio_status == PW_OK)
+                audio_status = pw_audio_ps5_open_port_as(&audio_ops, main_user, PW_AUDIO_PS5_PORT_MAIN,
+                                                         &audio_port, &main_result);
+            /* the foreground user's main port refused: the system user's, as before */
+            if (audio_status == PW_ERR_STATE && main_user != PW_AUDIO_PS5_USER_SYSTEM) {
+                PS5LOG_LOG("PW_WINE64 audio main user=%d result=%#x", main_user, (unsigned)main_result);
+                audio_status = pw_audio_ps5_open_port(&audio_ops, &audio_port);
+            }
+            if (audio_status == PW_OK && policy == PW_AUDIO_ROUTE_HEADSET && user >= 0 &&
+                pw_audio_ps5_open_port_as(&audio_ops, user, PW_AUDIO_PS5_PORT_PERSONAL, &audio_personal,
+                                          &personal_result) != PW_OK)
+                audio_personal = -1;
             if (audio_mask >= 0) (void)pw_title_ps5_umask((unsigned)audio_mask);
+            pw_audio_route_init(&audio_route, policy);
             if (audio_status == PW_OK) set_audio(wine_audio, NULL);
-            PS5LOG_LOG("PW_WINE64 audio sink=%d port=%d status=%s", set_audio != NULL, audio_port,
-                       pw_result_name(audio_status));
+            PS5LOG_LOG("PW_WINE64 audio sink=%d port=%d status=%s route=%s user=%d personal=%d result=%#x",
+                       set_audio != NULL, audio_port, pw_result_name(audio_status),
+                       policy == PW_AUDIO_ROUTE_HEADSET ? "headset" :
+                       policy == PW_AUDIO_ROUTE_MAIN_USER ? "main-user" : "main", user, audio_personal,
+                       (unsigned)personal_result);
         }
         /* The game starts in its profile's working directory. A title
          * cannot chdir, so ntdll keeps a logical one (wine/ps5/pw_wine_cwd.h),
