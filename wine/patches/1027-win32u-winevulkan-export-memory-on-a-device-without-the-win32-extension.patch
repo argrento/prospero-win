@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Tue, 17 Nov 2026 01:00:00 +0100
+Subject: [PATCH] win32u, winevulkan: Export memory on a device without
+ VK_KHR_external_memory_win32.
+
+vkd3d-proton allocates a resource on a shared heap
+(D3D12_HEAP_FLAG_SHARED) with VkExportMemoryAllocateInfo and then asks
+for the memory's Win32 handle, without checking that the device has
+VK_KHR_external_memory_win32. On a host with no external memory fds,
+win32u offers no such extension, so vkGetDeviceProcAddr returned NULL
+for vkGetMemoryWin32HandleKHR and the program jumped to address 0 as
+soon as it made such a resource (Unreal Engine 5 makes one while it
+starts).
+
+win32u exports the memory anyway: it creates a D3DKMT resource without
+a host fd, and an NT handle for it, so vkGetMemoryWin32HandleKHR has an
+answer. winevulkan now returns the function whatever extensions the
+device has. vkGetMemoryWin32HandlePropertiesKHR and imports still need
+the extension.
+
+On a host that has external memory fds, a device without the extension
+has no host VK_KHR_external_memory_fd either, and the export called the
+NULL vkGetMemoryFdKHR. win32u now takes the host handle type from the
+device's own extensions, and such a device exports without an fd too,
+the way it does on a host without fds.
+---
+ dlls/win32u/vulkan.c     | 15 +++++++++++++--
+ dlls/winevulkan/loader.c | 10 ++++++++--
+ 2 files changed, 21 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index f158e05..7f4a395 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -262,6 +262,15 @@ static VkExternalMemoryHandleTypeFlagBits get_host_external_memory_type(void)
+     return 0;
+ }
+ 
++/* The host handle type a device exports memory as, or 0 when the device has no
++ * host extension for it: VK_KHR_external_memory_win32 wasn't enabled, or the
++ * host has no external memory fds. Memory is then exported without an fd. */
++static VkExternalMemoryHandleTypeFlagBits get_device_external_memory_type( struct vulkan_device *device )
++{
++    if (!device->extensions.has_VK_KHR_external_memory_fd) return 0;
++    return get_host_external_memory_type();
++}
++
+ static VkExternalSemaphoreHandleTypeFlagBits get_host_external_semaphore_type(void)
+ {
+     struct vulkan_device_extensions extensions = {.has_VK_KHR_external_semaphore_win32 = 1};
+@@ -897,7 +906,7 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
+             {
+                 nt_shared = !(export_info->handleTypes & (VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT |
+                                                           VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT));
+-                export_info->handleTypes = get_host_external_memory_type();
++                export_info->handleTypes = get_device_external_memory_type( device );
+             }
+             break;
+         case VK_STRUCTURE_TYPE_EXPORT_MEMORY_WIN32_HANDLE_INFO_KHR:
+@@ -993,7 +1002,9 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
+             VkMemoryGetFdInfoKHR get_fd_info = {.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, .memory = host_device_memory};
+             int fd = -1;
+ 
+-            switch ((get_fd_info.handleType = get_host_external_memory_type()))
++            if (!(get_fd_info.handleType = get_device_external_memory_type( device )))
++                TRACE( "No host handle type, exporting memory without an fd\n" );
++            else switch (get_fd_info.handleType)
+             {
+             case VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT:
+                 if ((res = device->p_vkGetMemoryFdKHR( device->host.device, &get_fd_info, &fd ))) goto failed;
+diff --git a/dlls/winevulkan/loader.c b/dlls/winevulkan/loader.c
+index 2ce3c73..4eb6a39 100644
+--- a/dlls/winevulkan/loader.c
++++ b/dlls/winevulkan/loader.c
+@@ -138,10 +138,16 @@ PFN_vkVoidFunction WINAPI vkGetDeviceProcAddr(VkDevice device, const char *name)
+     if (!device || !name)
+         return NULL;
+ 
++    /* vkd3d-proton asks for the Win32 handle of every resource it allocates on a
++     * shared heap without checking for VK_KHR_external_memory_win32. A host
++     * without external memory fds gets no such extension, but win32u still
++     * exports the memory as a D3DKMT resource, so the call can answer instead of
++     * jumping to a NULL pointer. */
++    if (!strcmp(name, "vkGetMemoryWin32HandleKHR"))
++        return (PFN_vkVoidFunction)vkGetMemoryWin32HandleKHR;
++
+     if (device->extensions.has_VK_KHR_external_memory_win32)
+     {
+-        if (!strcmp(name, "vkGetMemoryWin32HandleKHR"))
+-            return (PFN_vkVoidFunction)vkGetMemoryWin32HandleKHR;
+         if (!strcmp(name, "vkGetMemoryWin32HandlePropertiesKHR"))
+             return (PFN_vkVoidFunction)vkGetMemoryWin32HandlePropertiesKHR;
+     }
+-- 
+2.43.0
+

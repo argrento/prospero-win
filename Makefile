@@ -236,6 +236,7 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	python3 tests/test_wine_commit_limit.py
 	python3 tests/test_wine_fiber_stacks.py
 	python3 tests/test_d3d12_control.py
+	python3 tests/test_d3d12_shared_resource.py
 	python3 tests/test_wine_dib_section.py
 	python3 tests/test_wow64native_scaffold.py
 	python3 tests/test_vk_command_stream.py
@@ -330,6 +331,7 @@ wine-check: test
 	python3 tests/test_wine_commit_limit.py
 	python3 tests/test_wine_fiber_stacks.py
 	python3 tests/test_d3d12_control.py
+	python3 tests/test_d3d12_shared_resource.py
 	python3 tests/test_wine_dib_section.py
 
 audit:
