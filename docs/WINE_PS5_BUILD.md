@@ -744,6 +744,11 @@ Wine's OSS driver.
 To use it on the console, stage `wineps5.prx` beside `ntdll.prx`. The game
 log then shows `PW_WINE64 audio sink=1 port=<handle> status=ok`.
 
+The title logs where the console plays its port, and can open the microphone
+for the capture endpoint. Both rest on PS4 values that are not yet measured
+on a PS5; [audio-console-probe.md](audio-console-probe.md) lists what to
+check on a console and which log lines answer it.
+
 ## XInput controller
 
 Games played with a controller ask XInput for one. Wine's xinput normally
