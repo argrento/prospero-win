@@ -26,8 +26,8 @@ device's own extensions, and such a device exports without an fd too,
 the way it does on a host without fds.
 ---
  dlls/win32u/vulkan.c     | 15 +++++++++++++--
- dlls/winevulkan/loader.c | 10 ++++++++--
- 2 files changed, 21 insertions(+), 4 deletions(-)
+ dlls/winevulkan/loader.c | 14 ++++++++++++--
+ 2 files changed, 25 insertions(+), 4 deletions(-)
 
 diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
 index f158e05..7f4a395 100644
@@ -73,7 +73,7 @@ diff --git a/dlls/winevulkan/loader.c b/dlls/winevulkan/loader.c
 index 2ce3c73..4eb6a39 100644
 --- a/dlls/winevulkan/loader.c
 +++ b/dlls/winevulkan/loader.c
-@@ -138,10 +138,16 @@ PFN_vkVoidFunction WINAPI vkGetDeviceProcAddr(VkDevice device, const char *name)
+@@ -138,10 +138,20 @@ PFN_vkVoidFunction WINAPI vkGetDeviceProcAddr(VkDevice device, const char *name)
      if (!device || !name)
          return NULL;
  
@@ -81,7 +81,11 @@ index 2ce3c73..4eb6a39 100644
 +     * shared heap without checking for VK_KHR_external_memory_win32. A host
 +     * without external memory fds gets no such extension, but win32u still
 +     * exports the memory as a D3DKMT resource, so the call can answer instead of
-+     * jumping to a NULL pointer. */
++     * jumping to a NULL pointer.
++     * TODO: vkd3d-proton should check the extension itself, as it already checks
++     * that shared fences can be exported: allocate shared heap memory without
++     * VkExportMemoryAllocateInfo when the device lacks it, skip the D3DKMT export
++     * and fail CreateSharedHandle with E_NOTIMPL. Remove this then. */
 +    if (!strcmp(name, "vkGetMemoryWin32HandleKHR"))
 +        return (PFN_vkVoidFunction)vkGetMemoryWin32HandleKHR;
 +
