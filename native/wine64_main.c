@@ -856,8 +856,10 @@ static PwAudioRoute audio_route;
 static uint32_t audio_volume = PW_GAME_VOLUME_MAX;
 /* Grains played, and those with any sound in them. */
 static volatile unsigned long audio_grains, audio_audible;
-/* Changes of the ports' state since the start: a headset came or went. The
- * microphone may reopen on it (PW_AUDIO_MIC_REOPEN=plug). */
+/* Changes of the main port's state the capture thread saw while a game
+ * recorded: a headset came or went. The microphone may reopen on it
+ * (PW_AUDIO_MIC_REOPEN=plug). Only the capture thread moves it, so one plug
+ * is one reopen. */
 static uint32_t audio_plug_epoch;
 
 static void audio_log_state(const char *name, PwAudioRouteState state, int status,
@@ -880,10 +882,8 @@ static void audio_check_route(void)
 
     if (audio_personal >= 0)
         personal = pw_audio_ps5_port_state(&audio_ops, audio_personal, &personal_status, &personal_raw);
-    const int first = audio_route.grains == 1;
     int changed = pw_audio_route_update(&audio_route, &main, audio_personal >= 0 ? &personal : NULL);
     if (!(changed & PW_AUDIO_ROUTE_STATE_CHANGED)) return;
-    if (!first) __atomic_add_fetch(&audio_plug_epoch, 1, __ATOMIC_RELEASE);
     audio_log_state("main", main, main_status, &main_raw);
     if (audio_personal >= 0) audio_log_state("personal", personal, personal_status, &personal_raw);
     if (changed & PW_AUDIO_ROUTE_PORT_CHANGED)
@@ -935,9 +935,9 @@ static int microphone_open(void *context, uint32_t *rate)
     return pw_audio_in_ps5_open(&audio_in, rate) == PW_OK ? 0 : -1;
 }
 
-/* The main port's state as the capture thread last saw it: a game that
- * records without playing never runs the sink's check, so the plug epoch
- * also moves here. Only the capture thread reads or writes these. */
+/* The main port's state as the capture thread last saw it; it reads the
+ * state itself, so a game that records without playing is covered too. Only
+ * the capture thread reads or writes these. */
 static PwAudioRouteState microphone_port_seen;
 static uint32_t microphone_port_reads;
 
