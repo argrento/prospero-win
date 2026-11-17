@@ -455,6 +455,7 @@ static void capture_loop(void *args)
     struct ps5_stream *stream;
     uint32_t rate = PW_WINE_AUDIO_RATE, retry = 0;
     BOOL open = FALSE, listening, heard;
+    LARGE_INTEGER last = {{0}}, now, freq;
 
     pthread_mutex_lock(&lock);
     for (;;)
@@ -498,6 +499,17 @@ static void capture_loop(void *args)
         heard = open && !sink.input_read(grain);
         /* no microphone data: silence, at the microphone's pace */
         if (!heard) capture_wait(rate);
+        else
+        {
+            /* a read that came back in under half a grain did not block (no
+             * device, or muted): wait half a grain, or the thread would spin
+             * and run the clock fast */
+            NtQueryPerformanceCounter(&now, &freq);
+            if (last.QuadPart && (now.QuadPart - last.QuadPart) * rate * 2 <
+                (LONGLONG)PW_WINE_AUDIO_INPUT_GRAIN * freq.QuadPart)
+                capture_wait(rate * 2);
+        }
+        NtQueryPerformanceCounter(&last, NULL);
 
         pthread_mutex_lock(&lock);
         for (stream = captures; stream; stream = stream->next)

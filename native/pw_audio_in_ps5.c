@@ -149,7 +149,14 @@ int pw_audio_in_ps5_read(PwAudioInPs5 *in, int16_t *frames, uint32_t epoch)
         in->epoch = epoch;
         if (in->reopen == PW_AUDIO_IN_PS5_REOPEN_PLUG) reopen(in, "plug");
     }
+    /* a short or empty read leaves silence, not the last grain */
+    memset(frames, 0, PW_AUDIO_IN_PS5_GRAIN * sizeof(*frames));
     int status = in->handle >= 0 ? in->ops.input(in->handle, frames) : -1;
+    /* what the console answers on success is not measured: the first is logged */
+    if (status >= 0 && !in->reads) {
+        snprintf(line, sizeof(line), "input first result=%#x", (unsigned)status);
+        say(in, line);
+    }
     check(in);
     if (status < 0) {
         /* the first failure, then one line a thousand */

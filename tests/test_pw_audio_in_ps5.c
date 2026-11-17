@@ -121,6 +121,7 @@ static void test_read_and_silent_state(void)
     assert(pw_audio_in_ps5_open(&in, &rate) == PW_OK);
     assert(pw_audio_in_ps5_read(&in, NULL, 0) == PW_ERR_PRECONDITION);
     assert(pw_audio_in_ps5_read(&in, grain, 0) == PW_OK && grain[0] == 1000 && grain[255] == 1255);
+    assert(logged("input first result=0x100"));
     /* the state is read every PW_AUDIO_IN_PS5_CHECK_GRAINS grains, logged on a change */
     for (int i = 1; i < PW_AUDIO_IN_PS5_CHECK_GRAINS; i++) assert(pw_audio_in_ps5_read(&in, grain, 0) == PW_OK);
     assert(states == 1 && in.silent == 0 && logged("silent=0 reads=47"));
@@ -133,7 +134,7 @@ static void test_read_and_silent_state(void)
     assert(opens == 1 && in.reopens == 0);
     /* a failed read is an error for the caller, logged once */
     input_fails = 1;
-    assert(pw_audio_in_ps5_read(&in, grain, 0) == PW_ERR_STATE);
+    assert(pw_audio_in_ps5_read(&in, grain, 0) == PW_ERR_STATE && grain[0] == 0 && grain[255] == 0);
     assert(pw_audio_in_ps5_read(&in, grain, 0) == PW_ERR_STATE);
     assert(in.failures == 2 && logged("input result=0x80260009 failures=1") && !logged("failures=2"));
     pw_audio_in_ps5_close(&in);

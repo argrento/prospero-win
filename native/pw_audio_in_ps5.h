@@ -77,7 +77,8 @@ int pw_audio_in_ps5_init(PwAudioInPs5 *in, const PwAudioInPs5Ops *ops, int user_
  * opened, PW_ERR_PRECONDITION when it is open already. */
 int pw_audio_in_ps5_open(PwAudioInPs5 *in, uint32_t *rate);
 /* One grain of PW_AUDIO_IN_PS5_GRAIN mono frames: PW_OK, or PW_ERR_STATE
- * when the system gave none (the caller plays silence). epoch: a number the
+ * when the system gave none (the caller plays silence). frames is cleared
+ * first, so frames the system did not fill are silence. epoch: a number the
  * caller changes when a headset may have come or gone. */
 int pw_audio_in_ps5_read(PwAudioInPs5 *in, int16_t *frames, uint32_t epoch);
 void pw_audio_in_ps5_close(PwAudioInPs5 *in);
