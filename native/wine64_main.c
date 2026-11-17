@@ -48,6 +48,7 @@
 #include "pw_file_limits.h"
 #include "pw_helper_ps5.h"
 #include "pw_audio_ps5.h"
+#include "pw_audio_in_ps5.h"
 #include "pw_audio_route.h"
 #include "pw_pad_ps5.h"
 #include "pw_hid_ps5.h"
@@ -851,6 +852,9 @@ static int audio_port = -1, audio_personal = -1;
 static PwAudioRoute audio_route;
 /* Grains played, and those with any sound in them. */
 static volatile unsigned long audio_grains, audio_audible;
+/* Changes of the ports' state since the start: a headset came or went. The
+ * microphone may reopen on it (PW_AUDIO_MIC_REOPEN=plug). */
+static uint32_t audio_plug_epoch;
 
 static void audio_log_state(const char *name, PwAudioRouteState state, int status,
                             const PwAudioPs5PortState *raw)
@@ -872,8 +876,10 @@ static void audio_check_route(void)
 
     if (audio_personal >= 0)
         personal = pw_audio_ps5_port_state(&audio_ops, audio_personal, &personal_status, &personal_raw);
+    const int first = audio_route.grains == 1;
     int changed = pw_audio_route_update(&audio_route, &main, audio_personal >= 0 ? &personal : NULL);
     if (!(changed & PW_AUDIO_ROUTE_STATE_CHANGED)) return;
+    if (!first) __atomic_add_fetch(&audio_plug_epoch, 1, __ATOMIC_RELEASE);
     audio_log_state("main", main, main_status, &main_raw);
     if (audio_personal >= 0) audio_log_state("personal", personal, personal_status, &personal_raw);
     if (changed & PW_AUDIO_ROUTE_PORT_CHANGED)
@@ -897,6 +903,47 @@ static int wine_audio(void *context, const int16_t *frames)
     }
     return audio_ops.output(audio_port, frames) < 0 ? -1 : 0;
 }
+
+/* The microphone (native/pw_audio_in_ps5.h), which Wine's capture endpoint
+ * reads: the player's, opened by the driver's capture thread only while a
+ * game captures, and only from that thread. */
+static PwAudioInPs5 audio_in;
+
+static void microphone_log(const char *line)
+{
+    PS5LOG_LOG("PW_WINE64 microphone %s", line);
+}
+
+static int microphone_open(void *context, uint32_t *rate)
+{
+    (void)context;
+    int status = pw_audio_in_ps5_open(&audio_in, rate);
+    /* The output port opens only under the console's umask 0 (see the
+     * sink); if the microphone refuses every attempt, it is tried once
+     * more under it. The umask is the process's: files other threads make
+     * in that moment get the wider mode. */
+    if (status == PW_ERR_STATE && per_game_mode) {
+        const int mask = pw_title_ps5_umask(0);
+        status = pw_audio_in_ps5_open(&audio_in, rate);
+        if (mask >= 0) (void)pw_title_ps5_umask((unsigned)mask);
+        PS5LOG_LOG("PW_WINE64 microphone open under umask 0 status=%s", pw_result_name(status));
+    }
+    return status == PW_OK ? 0 : -1;
+}
+
+static int microphone_read(void *context, int16_t *frames)
+{
+    (void)context;
+    return pw_audio_in_ps5_read(&audio_in, frames, __atomic_load_n(&audio_plug_epoch, __ATOMIC_ACQUIRE)) == PW_OK ? 0 : -1;
+}
+
+static void microphone_close(void *context)
+{
+    (void)context;
+    pw_audio_in_ps5_close(&audio_in);
+}
+
+_Static_assert(PW_WINE_AUDIO_INPUT_GRAIN == PW_AUDIO_IN_PS5_GRAIN, "Wine's microphone grain is the console's");
 
 /* A [debug] env value of the profile, or NULL. */
 static const char *debug_env_value(const PwGameProfile *game, const char *name)
@@ -2687,6 +2734,27 @@ int main(int argc, char **argv)
                        policy == PW_AUDIO_ROUTE_HEADSET ? "headset" :
                        policy == PW_AUDIO_ROUTE_MAIN_USER ? "main-user" : "main", user, audio_personal,
                        (unsigned)personal_result);
+        }
+        /* The microphone, for Wine's capture endpoint: player 1's, the
+         * foreground user the pad opened. Nothing of libSceAudioIn is
+         * called here; the driver opens it when a game captures. Without
+         * a user or ntdll's input calls, no capture device is listed. */
+        {
+            static const PwWineAudioInput microphone = { microphone_open, microphone_read, microphone_close };
+            static PwAudioInPs5Ops microphone_ops;
+            void (*set_input)(const PwWineAudioInput *, void *) = (void (*)(const PwWineAudioInput *, void *))
+                (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_audio_input");
+            const int user = pad_status == PW_OK && pad.user_id >= 0 ? (int)pad.user_id : -1;
+            const int reopen = pw_audio_in_ps5_reopen_policy(debug_env_value(game, "PW_AUDIO_MIC_REOPEN"));
+            int microphone_status = !set_input ? PW_ERR_NOT_FOUND : user < 0 ? PW_ERR_STATE :
+                                    pw_audio_in_ps5_platform_ops(&microphone_ops);
+            microphone_ops.log = microphone_log;
+            if (microphone_status == PW_OK)
+                microphone_status = pw_audio_in_ps5_init(&audio_in, &microphone_ops, user, reopen);
+            if (microphone_status == PW_OK) set_input(&microphone, NULL);
+            PS5LOG_LOG("PW_WINE64 microphone=%s user=%d reopen=%s", pw_result_name(microphone_status), user,
+                       reopen == PW_AUDIO_IN_PS5_REOPEN_PLUG ? "plug" :
+                       reopen == PW_AUDIO_IN_PS5_REOPEN_NONE ? "none" : "silent");
         }
         /* The game starts in its profile's working directory. A title
          * cannot chdir, so ntdll keeps a logical one (wine/ps5/pw_wine_cwd.h),

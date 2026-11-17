@@ -272,7 +272,7 @@ common=(-DPW_BUILD_ID=\""$build_id"\" -O2 -Wall -Wextra -Werror -ffunction-secti
         -DPW_TITLE_PROBE="$title_probe")
 
 sources=(
-    native/wine64_main.c native/pw_diagnostics.c native/pw_audio_ps5.c native/pw_pad_ps5.c native/pw_rumble.c native/pw_agc_ps5.c
+    native/wine64_main.c native/pw_diagnostics.c native/pw_audio_ps5.c native/pw_audio_in_ps5.c native/pw_pad_ps5.c native/pw_rumble.c native/pw_agc_ps5.c
     native/pw_agc_submit_lifecycle.c native/pw_videoout_ps5.c native/pw_data_mount.c
     native/pw_lapy_elevation.c native/pw_file_limits.c native/pw_helper_ps5.c
     native/pw_wine_display.c native/pw_wine_library.c native/pw_hid_ps5.c native/pw_osk_ps5.c
@@ -313,6 +313,13 @@ objects+=("$build/obj/ps5log.o" "$build/obj/ps5log_ps5_net.o")
     -o "$build/obj/agc-driver-import.o"
 "$sdk/bin/prospero-lld" --shared -soname libSceAgcDriver.prx \
     -o "$build/import-stubs/libSceAgcDriver.so" "$build/obj/agc-driver-import.o"
+# The microphone (native/pw_audio_in_ps5.c): the payload SDK has no
+# libSceAudioIn stub, so this facade names its imports. The title calls them
+# only while a game captures.
+"${cc[@]}" -std=c11 -O2 -fPIC -c "$root/native/stubs/libSceAudioIn.c" \
+    -o "$build/obj/audio-in-import.o"
+"$sdk/bin/prospero-lld" --shared -soname libSceAudioIn.prx \
+    -o "$build/import-stubs/libSceAudioIn.so" "$build/obj/audio-in-import.o"
 
 # Payload kernel stubs describe different import libraries. Including all of
 # them lets the weak stub select libkernel_web, which a native title does not
@@ -328,11 +335,12 @@ done
 "$sdk/bin/prospero-lld" -T "$layout" --eh-frame-hdr -e _start \
     -o "$build/llvm-pie.elf" "$build/obj/app_crt.o" "${objects[@]}" \
     --as-needed "${native_stubs[@]}" "$build/import-stubs/libSceAgc.so" \
-    "$build/import-stubs/libSceAgcDriver.so"
+    "$build/import-stubs/libSceAgcDriver.so" "$build/import-stubs/libSceAudioIn.so"
 "$tool" link --in "$build/llvm-pie.elf" --out "$build/eboot.elf" \
     --stub-dir "$sdk/target/lib" --module-sdk 0x02000009 \
     --stub "$build/import-stubs/libSceAgc.so" \
     --stub "$build/import-stubs/libSceAgcDriver.so" \
+    --stub "$build/import-stubs/libSceAudioIn.so" \
     --companion-sdk 0x08050001 --file-name eboot.elf
 "$tool" self --sign --in "$build/eboot.elf" --out "$dist/eboot.bin" \
     --magic 0x1D3D154F
