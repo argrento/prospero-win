@@ -315,7 +315,8 @@ objects+=("$build/obj/ps5log.o" "$build/obj/ps5log_ps5_net.o")
     -o "$build/import-stubs/libSceAgcDriver.so" "$build/obj/agc-driver-import.o"
 # The microphone (native/pw_audio_in_ps5.c): the payload SDK has no
 # libSceAudioIn stub, so this facade names its imports. The title calls them
-# only while a game captures.
+# only while a game captures, and declares them weak to find an import the
+# firmware left at 0 (weak references alone would let --as-needed drop it).
 "${cc[@]}" -std=c11 -O2 -fPIC -c "$root/native/stubs/libSceAudioIn.c" \
     -o "$build/obj/audio-in-import.o"
 "$sdk/bin/prospero-lld" --shared -soname libSceAudioIn.prx \
@@ -335,7 +336,8 @@ done
 "$sdk/bin/prospero-lld" -T "$layout" --eh-frame-hdr -e _start \
     -o "$build/llvm-pie.elf" "$build/obj/app_crt.o" "${objects[@]}" \
     --as-needed "${native_stubs[@]}" "$build/import-stubs/libSceAgc.so" \
-    "$build/import-stubs/libSceAgcDriver.so" "$build/import-stubs/libSceAudioIn.so"
+    "$build/import-stubs/libSceAgcDriver.so" \
+    --no-as-needed "$build/import-stubs/libSceAudioIn.so"
 "$tool" link --in "$build/llvm-pie.elf" --out "$build/eboot.elf" \
     --stub-dir "$sdk/target/lib" --module-sdk 0x02000009 \
     --stub "$build/import-stubs/libSceAgc.so" \

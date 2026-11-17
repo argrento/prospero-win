@@ -11,11 +11,15 @@ const PwAudioInPs5Attempt pw_audio_in_ps5_attempts[PW_AUDIO_IN_PS5_ATTEMPTS] = {
 
 #ifndef PW_AUDIO_IN_PS5_HOST_TEST
 /* Link-only imports (native/stubs/libSceAudioIn.c); the system's module
- * provides them. */
-extern int sceAudioInOpen(int, int, int, uint32_t, uint32_t, uint32_t);
-extern int sceAudioInInput(int, void *);
-extern int sceAudioInGetSilentState(int);
-extern int sceAudioInClose(int);
+ * provides them. The firmware leaves an import it cannot resolve at 0, and
+ * a call to it jumps to 0 (docs/WINE_PS5_BUILD.md, "Imports a title does
+ * not get"). Weak declarations make the compiler read the resolved address
+ * instead of assuming one, so a title without libSceAudioIn gets no
+ * microphone rather than a jump to 0. */
+extern int sceAudioInOpen(int, int, int, uint32_t, uint32_t, uint32_t) __attribute__((weak));
+extern int sceAudioInInput(int, void *) __attribute__((weak));
+extern int sceAudioInGetSilentState(int) __attribute__((weak));
+extern int sceAudioInClose(int) __attribute__((weak));
 static int platform_open(int u, int t, int i, uint32_t g, uint32_t r, uint32_t f)
 { return sceAudioInOpen(u, t, i, g, r, f); }
 static int platform_input(int h, void *p) { return sceAudioInInput(h, p); }
@@ -30,6 +34,8 @@ int pw_audio_in_ps5_platform_ops(PwAudioInPs5Ops *ops)
 #ifdef PW_AUDIO_IN_PS5_HOST_TEST
     return PW_ERR_UNSUPPORTED;
 #else
+    if (!sceAudioInOpen || !sceAudioInInput || !sceAudioInGetSilentState || !sceAudioInClose)
+        return PW_ERR_NOT_FOUND;
     ops->open = platform_open;
     ops->input = platform_input;
     ops->silent_state = platform_silent;

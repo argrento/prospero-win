@@ -66,7 +66,8 @@ typedef struct PwAudioInPs5 {
     uint32_t reads, failures, reopens;
 } PwAudioInPs5;
 
-/* The console's calls; PW_ERR_UNSUPPORTED on the host. */
+/* The console's calls; PW_ERR_NOT_FOUND when the firmware resolved none of
+ * libSceAudioIn for this title, PW_ERR_UNSUPPORTED on the host. */
 int pw_audio_in_ps5_platform_ops(PwAudioInPs5Ops *ops);
 /* The policy an environment value names: "plug", "none", else silent. */
 int pw_audio_in_ps5_reopen_policy(const char *value);
