@@ -271,7 +271,31 @@ static int display_field(PwGameDisplay *display, uint32_t *seen, const uint8_t *
 }
 
 enum { SECTION_NONE, SECTION_APPLICATION, SECTION_DISPLAY, SECTION_INPUT, SECTION_DEBUG, SECTION_RUNTIME,
-       SECTION_ENVIRONMENT, SECTION_LAUNCHER, SECTION_HELPER, SECTION_STEAM };
+       SECTION_ENVIRONMENT, SECTION_LAUNCHER, SECTION_HELPER, SECTION_STEAM, SECTION_AUDIO };
+
+/* [audio]: volume = 0..100 in at most three digits, microphone = on|off;
+ * each once. */
+static int audio_field(PwGameAudio *audio, uint32_t *seen, const uint8_t *key, size_t key_length,
+                       const uint8_t *v, size_t n)
+{
+    if (is(key, key_length, "volume")) {
+        uint32_t volume;
+        if ((*seen & 1u) || n > 3 || number(v, n, &volume) != PW_OK || volume > PW_GAME_VOLUME_MAX)
+            return PW_ERR_MALFORMED;
+        audio->volume = volume;
+        *seen |= 1u;
+        return PW_OK;
+    }
+    if (is(key, key_length, "microphone")) {
+        if (*seen & 2u) return PW_ERR_MALFORMED;
+        if (is(v, n, "on")) audio->microphone = 1;
+        else if (is(v, n, "off")) audio->microphone = 0;
+        else return PW_ERR_UNSUPPORTED;
+        *seen |= 2u;
+        return PW_OK;
+    }
+    return PW_ERR_UNSUPPORTED;
+}
 
 /* One line: its trimmed extent and where the next begins. */
 static size_t next_line(const uint8_t *bytes, size_t length, size_t cursor,
@@ -297,6 +321,7 @@ static int section_of(const uint8_t *begin, const uint8_t *end)
            is(begin, (size_t)(end - begin), "launcher") ? SECTION_LAUNCHER :
            is(begin, (size_t)(end - begin), "helper") ? SECTION_HELPER :
            is(begin, (size_t)(end - begin), "steam") ? SECTION_STEAM :
+           is(begin, (size_t)(end - begin), "audio") ? SECTION_AUDIO :
            is(begin, (size_t)(end - begin), "debug") ? SECTION_DEBUG :
            is(begin, (size_t)(end - begin), "runtime") ? SECTION_RUNTIME :
            is(begin, (size_t)(end - begin), "environment") ? SECTION_ENVIRONMENT : -1;
@@ -583,7 +608,7 @@ static int parse_sections(const uint8_t *bytes, size_t length, PwGameProfile *pr
                           PwGameInput *input_only, size_t *application_end)
 {
     int section = SECTION_NONE;
-    uint32_t seen_sections = 0, display_seen = 0, runtime_seen = 0;
+    uint32_t seen_sections = 0, display_seen = 0, runtime_seen = 0, audio_seen = 0;
     size_t cursor = 0;
 
     while (cursor < length) {
@@ -620,6 +645,8 @@ static int parse_sections(const uint8_t *bytes, size_t length, PwGameProfile *pr
             helper_field(profile, begin, (size_t)(key_end - begin), value, (size_t)(end - value)) :
             section == SECTION_STEAM ?
             steam_field(profile, begin, (size_t)(key_end - begin), value, (size_t)(end - value)) :
+            section == SECTION_AUDIO ?
+            audio_field(&profile->audio, &audio_seen, begin, (size_t)(key_end - begin), value, (size_t)(end - value)) :
             section == SECTION_ENVIRONMENT ?
             environment_field(profile, begin, (size_t)(key_end - begin), value, (size_t)(end - value)) :
             section == SECTION_DEBUG ?
@@ -827,6 +854,8 @@ int pw_game_profile_parse(const uint8_t *bytes, size_t length, PwGameProfile *pr
     pw_game_input_init(&parsed.launcher_input);
     parsed.display.show_fps = 1;        /* on unless the profile says false */
     parsed.display.refresh = 60;
+    parsed.audio.volume = PW_GAME_VOLUME_MAX;
+    parsed.audio.microphone = 1;
     if ((status = parse_sections(bytes, length, &parsed, NULL, &application_end)) != PW_OK)
         return status;
     if ((status = pw_app_profile_parse(bytes, application_end, &parsed.app)) != PW_OK)

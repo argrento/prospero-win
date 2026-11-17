@@ -266,6 +266,29 @@ static void test_mix_and_store(void)
     assert(out[0]==16384 && out[1]==-16384 && out[2]==0 && out[3]==-1);
 }
 
+static void test_volume(void)
+{
+    const int16_t in[4]={32767,-32768,1000,-1};
+    int16_t out[4];
+    pw_audio_mix_volume(in,out,2,100);
+    assert(!memcmp(in,out,sizeof(in)));
+    pw_audio_mix_volume(in,out,2,250);         /* more than 100 is 100 */
+    assert(!memcmp(in,out,sizeof(in)));
+    pw_audio_mix_volume(in,out,2,50);
+    assert(out[0]==16383 && out[1]==-16384 && out[2]==500 && out[3]==0);
+    pw_audio_mix_volume(in,out,2,25);
+    assert(out[0]==8191 && out[1]==-8192 && out[2]==250);
+    pw_audio_mix_volume(in,out,2,0);
+    assert(!out[0] && !out[1] && !out[2] && !out[3]);
+    int16_t same[4]={2000,-2000,4,5};
+    pw_audio_mix_volume(same,same,2,75);       /* in place */
+    assert(same[0]==1500 && same[1]==-1500 && same[2]==3);
+    pw_audio_mix_volume(same,same,2,100);
+    assert(same[0]==1500);
+    pw_audio_mix_volume(NULL,out,2,50);
+    pw_audio_mix_volume(in,NULL,2,50);
+}
+
 int main(void)
 {
     test_format_check();
@@ -278,6 +301,7 @@ int main(void)
     test_downsample();
     test_wrap_underrun_reset();
     test_mix_and_store();
+    test_volume();
     puts("audio mix passed");
     return 0;
 }

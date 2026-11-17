@@ -284,7 +284,7 @@ sources=(
     third_party/mbedtls-publication/library/sha256.c
     src/pw_app_profile.c src/pw_profile_catalog.c src/pw_launcher_render.c src/pw_present.c
     src/pw_pad.c src/pw_game_menu.c src/pw_invite_prompt.c src/pw_helper_notify.c src/pw_helper_channel.c src/pw_input_switch.c src/pw_osk.c src/pw_hid.c src/pw_spinner.c src/pw_script_input.c
-    src/pw_tsc_calibrate.c src/pw_audio_route.c
+    src/pw_tsc_calibrate.c src/pw_audio_route.c src/pw_audio_mix.c
     wine/ps5/pw_wine_prx.c
 )
 objects=()

@@ -1319,6 +1319,14 @@ The title runs one game per process (`src/pw_wine_launch.h`):
   - `[display] opengl_thread` set the PS5 OpenGL SDK's glthread worker. Zink
     has none, so it is accepted for existing profiles and ignored; the
     launcher logs `PW_WINE64 ignored display opengl_thread=…`;
+  - `[audio] volume` (0 to 100, default 100) scales the game's mix in the
+    title's audio sink before the port plays it (`pw_audio_mix_volume`, a
+    linear gain: 50 is about -6 dB). It is the game's own level: the
+    console's volume does not change, and it holds when the output moves to
+    a headset. `[audio] microphone = off` (default `on`) gives Wine no
+    microphone: no capture device is listed and libSceAudioIn is never
+    called. The log has `PW_WINE64 audio ... volume=` and
+    `PW_WINE64 microphone=off`;
   - `[input]` binds each DualSense button to a key or a mouse button, and a
     stick moves the pointer. `preset = <name>` shares a mapping from
     `<root>/input/<name>.input`.

@@ -64,5 +64,9 @@ int pw_audio_mix_set_gain(PwAudioMixStream *stream,const float *gain,uint32_t co
 uint32_t pw_audio_mix_add(PwAudioMixStream *stream,float *accumulator,uint32_t frames);
 /* Clamp frames accumulated stereo frames into 16-bit output. */
 void pw_audio_mix_store(const float *accumulator,int16_t *output,uint32_t frames);
+/* A game's own volume ([audio] volume): frames stereo frames of input scaled
+ * by percent (0..100, more is 100) into output, which may be input. The
+ * gain is linear in amplitude, so 50 is about -6 dB; 100 copies. */
+void pw_audio_mix_volume(const int16_t *input,int16_t *output,uint32_t frames,uint32_t percent);
 
 #endif

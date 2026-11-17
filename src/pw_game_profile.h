@@ -72,6 +72,15 @@
  *                          ; does. The game runs without its helper when the
  *                          ; process cannot start
  *
+ *   [audio]
+ *   volume = 50            ; how loud the game plays, 0 (muted) to 100 (the
+ *                          ; default): a gain on the title's mix, so it
+ *                          ; follows the output to a headset; 1-3 digits
+ *   microphone = off       ; on (the default): Wine lists the console's
+ *                          ; microphone as the game's capture device; off:
+ *                          ; no capture device, and the title never opens
+ *                          ; the microphone
+ *
  *   [debug]
  *   winedebug = +seh,+virtual   ; Wine's debug channels for this game (default:
  *                               ; the title's, err+all,+loaddll,+process)
@@ -150,6 +159,7 @@ enum {
     PW_GAME_DESKTOP_MAX_W = 3840, PW_GAME_DESKTOP_MAX_H = 2160,
     PW_GAME_MOUSE_SPEED_DEFAULT = 1200, PW_GAME_MOUSE_SPEED_MAX = 20000,
     PW_GAME_RUMBLE_MAX = 100,
+    PW_GAME_VOLUME_MAX = 100,
     PW_GAME_WINEDEBUG_CAPACITY = 128,
     PW_GAME_DEBUG_ENV_MAX = 5, PW_GAME_DEBUG_ENV_NAME = 48, PW_GAME_DEBUG_ENV_VALUE = 96,
     PW_GAME_ENVIRONMENT_MAX = 8, PW_GAME_ENVIRONMENT_NAME = 64, PW_GAME_ENVIRONMENT_VALUE = 128,
@@ -216,6 +226,12 @@ typedef struct PwGameRuntime {
     const char *user_locale;    /* LC_MESSAGES value, static; NULL when unset */
 } PwGameRuntime;
 
+/* [audio]: the game's volume and whether it hears the microphone. */
+typedef struct PwGameAudio {
+    uint32_t volume;            /* percent of the mix, 0..PW_GAME_VOLUME_MAX */
+    int microphone;             /* 1: Wine lists the microphone */
+} PwGameAudio;
+
 /* A variable of Wine's environment; both strings are static. */
 typedef struct PwGameEnv { const char *name, *value; } PwGameEnv;
 
@@ -255,10 +271,11 @@ typedef struct PwGameProfile {
     PwGameEnvironmentEntry environment[PW_GAME_ENVIRONMENT_MAX];
     size_t environment_count;
     PwGameRuntime runtime;      /* [runtime], everything off by default */
+    PwGameAudio audio;          /* [audio]: full volume, microphone on by default */
 } PwGameProfile;
 
 /* Parse a whole profile. [application] must come first; [display],
- * [input], [launcher], [helper], [debug], [runtime] and [environment] are optional, once each.
+ * [input], [launcher], [helper], [audio], [debug], [runtime] and [environment] are optional, once each.
  * PW_OK or a PW_ERR_* status. */
 int pw_game_profile_parse(const uint8_t *bytes, size_t length, PwGameProfile *profile);
 /* The variables runtime sets in Wine's environment, into env, which has

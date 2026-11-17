@@ -464,6 +464,40 @@ static void test_version(void)
            pw_game_version_env(&p, NULL) == 0);
 }
 
+/* [audio]: volume 0-100 in at most three digits, microphone on|off, each
+ * once; without the section full volume and the microphone on. */
+static void test_audio(void)
+{
+    PwGameProfile p;
+
+    assert(parse(APP, &p) == PW_OK && p.audio.volume == 100 && p.audio.microphone == 1);
+    assert(parse(APP "[audio]\nvolume = 50\n", &p) == PW_OK && p.audio.volume == 50 && p.audio.microphone == 1);
+    assert(parse(APP "[audio]\nvolume = 0\nmicrophone = off\n", &p) == PW_OK);
+    assert(p.audio.volume == 0 && p.audio.microphone == 0);
+    assert(parse(APP "[audio]\nmicrophone = on\n", &p) == PW_OK && p.audio.microphone == 1 && p.audio.volume == 100);
+    assert(parse(APP "[audio]\nvolume = 100\n", &p) == PW_OK && p.audio.volume == 100);
+    /* three digits, as the launcher writes them; leading zeros are digits */
+    assert(parse(APP "[audio]\nvolume = 007\n", &p) == PW_OK && p.audio.volume == 7);
+    assert(parse(APP "[display]\nview = desktop\n[audio]\nMicrophone = OFF\n[runtime]\nversion = 2\n", &p) == PW_OK);
+    assert(p.audio.microphone == 0);
+    assert(parse(APP "[audio]\nvolume = 101\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[audio]\nvolume = 0100\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[audio]\nvolume = -1\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[audio]\nvolume = 50%\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[audio]\nvolume =\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[audio]\nvolume = 50\nvolume = 50\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[audio]\nmicrophone = off\nmicrophone = off\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[audio]\nmicrophone = true\n", &p) == PW_ERR_UNSUPPORTED);
+    assert(parse(APP "[audio]\nmicrophone = 0\n", &p) == PW_ERR_UNSUPPORTED);
+    assert(parse(APP "[audio]\nmute = true\n", &p) == PW_ERR_UNSUPPORTED);
+    assert(parse(APP "[audio]\n[audio]\n", &p) == PW_ERR_MALFORMED);
+    /* not in an input preset */
+    PwGameInput input;
+    pw_game_input_init(&input);
+    assert(pw_game_input_parse((const uint8_t *)"[input]\nmode = xinput\n[audio]\nvolume = 5\n", 41, &input) ==
+           PW_ERR_MALFORMED);
+}
+
 static void test_refusals(void)
 {
     static const char *const bad[] = {
@@ -945,6 +979,7 @@ int main(void)
     test_environment();
     test_ntoskrnl_hosted();
     test_refusals();
+    test_audio();
     test_presets();
     test_default_mode();
     printf("game profile passed: application plus display and input, every binding kind, "

@@ -50,6 +50,7 @@
 #include "pw_audio_ps5.h"
 #include "pw_audio_in_ps5.h"
 #include "pw_audio_route.h"
+#include "pw_audio_mix.h"
 #include "pw_pad_ps5.h"
 #include "pw_hid_ps5.h"
 #include "pw_osk_ps5.h"
@@ -850,6 +851,9 @@ _Static_assert(PW_WINE_AUDIO_GRAIN == PW_AUDIO_PS5_GRAIN && PW_WINE_AUDIO_RATE =
 static PwAudioPs5Ops audio_ops;
 static int audio_port = -1, audio_personal = -1;
 static PwAudioRoute audio_route;
+/* [audio] volume: the game's percent of its mix, applied here so it holds on
+ * whichever port plays. */
+static uint32_t audio_volume = PW_GAME_VOLUME_MAX;
 /* Grains played, and those with any sound in them. */
 static volatile unsigned long audio_grains, audio_audible;
 /* Changes of the ports' state since the start: a headset came or went. The
@@ -889,10 +893,16 @@ static void audio_check_route(void)
 
 static int wine_audio(void *context, const int16_t *frames)
 {
+    static int16_t scaled[2 * PW_WINE_AUDIO_GRAIN];
+
     (void)context;
     audio_grains++;
     for (size_t i = 0; i < 2u * PW_WINE_AUDIO_GRAIN; i++)
         if (frames[i]) { audio_audible++; break; }
+    if (audio_volume < PW_GAME_VOLUME_MAX) {
+        pw_audio_mix_volume(frames, scaled, PW_WINE_AUDIO_GRAIN, audio_volume);
+        frames = scaled;
+    }
     if (pw_audio_route_due(&audio_route)) audio_check_route();
     if (pw_audio_route_port(&audio_route) == PW_AUDIO_ROUTE_PORT_PERSONAL) {
         int status = audio_ops.output(audio_personal, frames);
@@ -2728,17 +2738,19 @@ int main(int argc, char **argv)
                 audio_personal = -1;
             if (audio_mask >= 0) (void)pw_title_ps5_umask((unsigned)audio_mask);
             pw_audio_route_init(&audio_route, policy);
+            if (game) audio_volume = game->audio.volume;
             if (audio_status == PW_OK) set_audio(wine_audio, NULL);
-            PS5LOG_LOG("PW_WINE64 audio sink=%d port=%d status=%s route=%s user=%d personal=%d result=%#x",
+            PS5LOG_LOG("PW_WINE64 audio sink=%d port=%d status=%s route=%s user=%d personal=%d result=%#x volume=%u",
                        set_audio != NULL, audio_port, pw_result_name(audio_status),
                        policy == PW_AUDIO_ROUTE_HEADSET ? "headset" :
                        policy == PW_AUDIO_ROUTE_MAIN_USER ? "main-user" : "main", user, audio_personal,
-                       (unsigned)personal_result);
+                       (unsigned)personal_result, (unsigned)audio_volume);
         }
         /* The microphone, for Wine's capture endpoint: player 1's, the
          * foreground user the pad opened. Nothing of libSceAudioIn is
          * called here; the driver opens it when a game captures. Without
-         * a user or ntdll's input calls, no capture device is listed. */
+         * a user or ntdll's input calls, or with [audio] microphone = off,
+         * no capture device is listed and libSceAudioIn is never called. */
         {
             static const PwWineAudioInput microphone = { microphone_open, microphone_read, microphone_close };
             static PwAudioInPs5Ops microphone_ops;
@@ -2746,13 +2758,14 @@ int main(int argc, char **argv)
                 (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_audio_input");
             const int user = pad_status == PW_OK && pad.user_id >= 0 ? (int)pad.user_id : -1;
             const int reopen = pw_audio_in_ps5_reopen_policy(debug_env_value(game, "PW_AUDIO_MIC_REOPEN"));
-            int microphone_status = !set_input ? PW_ERR_NOT_FOUND : user < 0 ? PW_ERR_STATE :
-                                    pw_audio_in_ps5_platform_ops(&microphone_ops);
+            const int off = game && !game->audio.microphone;
+            int microphone_status = off ? PW_ERR_UNSUPPORTED : !set_input ? PW_ERR_NOT_FOUND :
+                                    user < 0 ? PW_ERR_STATE : pw_audio_in_ps5_platform_ops(&microphone_ops);
             microphone_ops.log = microphone_log;
             if (microphone_status == PW_OK)
                 microphone_status = pw_audio_in_ps5_init(&audio_in, &microphone_ops, user, reopen);
             if (microphone_status == PW_OK) set_input(&microphone, NULL);
-            PS5LOG_LOG("PW_WINE64 microphone=%s user=%d reopen=%s", pw_result_name(microphone_status), user,
+            PS5LOG_LOG("PW_WINE64 microphone=%s user=%d reopen=%s", off ? "off" : pw_result_name(microphone_status), user,
                        reopen == PW_AUDIO_IN_PS5_REOPEN_PLUG ? "plug" :
                        reopen == PW_AUDIO_IN_PS5_REOPEN_NONE ? "none" : "silent");
         }

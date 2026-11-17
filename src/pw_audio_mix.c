@@ -178,3 +178,15 @@ void pw_audio_mix_store(const float *accumulator,int16_t *output,uint32_t frames
         output[i]=(int16_t)(value>=0?value+0.5f:value-0.5f);
     }
 }
+
+void pw_audio_mix_volume(const int16_t *input,int16_t *output,uint32_t frames,uint32_t percent)
+{
+    if(!input || !output)return;
+    if(percent>=100) {
+        if(output!=input)memmove(output,input,(size_t)frames*2*sizeof(*output));
+        return;
+    }
+    /* percent/100 in 16.16 fixed point: exact for 0, and never above unity */
+    const int32_t gain=(int32_t)((percent<<16)/100u);
+    for(uint32_t i=0;i<2*frames;i++)output[i]=(int16_t)(((int32_t)input[i]*gain)/65536);
+}
