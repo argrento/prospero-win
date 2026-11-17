@@ -50,7 +50,8 @@ static void test_passthrough(void)
     assert(s16(ring,3,0,1)==32767);
     assert(pw_audio_capture_write(&c,in,1,48000)==1 && s16(ring,4,0,1)==-32768);
     pw_audio_capture_consume(&c,3);
-    assert(c.offset==3 && c.held==2);
+    assert(c.offset==3 && c.held==2 && c.head==3 && c.produced==5);
+    assert(!pw_audio_capture_take_discontinuity(&c) && !pw_audio_capture_take_discontinuity(NULL));
     pw_audio_capture_consume(&c,9);
     assert(c.offset==5 && c.held==0);
 }
@@ -149,21 +150,25 @@ static void test_overrun(void)
     assert(pw_audio_capture_write(&c,in,7,48000)==7);
     /* made: 0 100 200 300 400 500 600; kept: the last four */
     assert(c.held==4 && c.dropped==3 && c.written==7 && c.offset==3);
+    /* the positions keep the device's clock: 7 made, the oldest held is the 4th */
+    assert(c.produced==7 && c.head==3);
+    assert(pw_audio_capture_take_discontinuity(&c) && !pw_audio_capture_take_discontinuity(&c));
     assert(s16(ring,3,0,1)==300 && s16(ring,0,0,1)==400 && s16(ring,2,0,1)==600);
     /* while the client reads, a full ring loses the new frames, not its data */
     c.locked=2;
     uint8_t before[sizeof(ring)];memcpy(before,ring,sizeof(ring));
     assert(pw_audio_capture_write(&c,in,3,48000)==3);
     assert(c.held==4 && c.dropped==6 && c.offset==3 && !memcmp(before,ring,sizeof(ring)));
+    assert(c.produced==10 && c.head==3 && pw_audio_capture_take_discontinuity(&c));
     pw_audio_capture_consume(&c,2);
-    assert(c.locked==0 && c.held==2 && c.offset==1);
+    assert(c.locked==0 && c.held==2 && c.offset==1 && c.head==5);
     /* then the oldest go again: made 300 400 500, the ring keeps 600 300 400 500 */
     assert(pw_audio_capture_write(&c,in+3,3,48000)==3);
     assert(c.held==4 && c.dropped==7 && c.offset==2);
     assert(s16(ring,2,0,1)==600 && s16(ring,3,0,1)==300 && s16(ring,0,0,1)==400 && s16(ring,1,0,1)==500);
     /* every frame locked: new ones are dropped, the ring is untouched */
     pw_audio_capture_reset(&c);
-    assert(c.held==0 && c.offset==0 && c.locked==0);
+    assert(c.held==0 && c.offset==0 && c.locked==0 && c.produced==0 && c.head==0 && !c.discontinuity);
     assert(pw_audio_capture_write(&c,in,4,48000)==4);
     c.locked=4;
     memcpy(before,ring,sizeof(ring));

@@ -19,6 +19,8 @@ void pw_audio_capture_reset(PwAudioCapture *capture)
 {
     if(!capture)return;
     capture->offset=capture->held=capture->locked=0;
+    capture->produced=capture->head=0;
+    capture->discontinuity=0;
     capture->phase=0;
     capture->previous=capture->current=0;
 }
@@ -68,12 +70,14 @@ static void encode(const PwAudioMixFormat *format,uint8_t *at,float value)
 
 static void put(PwAudioCapture *capture,float value)
 {
+    capture->produced++;
     if(capture->held==capture->capacity) {
+        capture->discontinuity=1;
         /* full: the oldest frame goes, unless the client is reading it (the
          * locked frames are the oldest): then the new one does */
         if(capture->locked){capture->dropped++;return;}
         if(++capture->offset==capture->capacity)capture->offset=0;
-        capture->held--;capture->dropped++;
+        capture->held--;capture->dropped++;capture->head++;
     }
     uint32_t at=(capture->offset+capture->held)%capture->capacity;
     encode(&capture->format,capture->frames+(size_t)at*capture->format.block_align,value);
@@ -111,5 +115,13 @@ void pw_audio_capture_consume(PwAudioCapture *capture,uint32_t frames)
     if(frames>capture->held)frames=capture->held;
     capture->offset=(capture->offset+frames)%capture->capacity;
     capture->held-=frames;
+    capture->head+=frames;
     capture->locked=0;
+}
+
+int pw_audio_capture_take_discontinuity(PwAudioCapture *capture)
+{
+    if(!capture || !capture->discontinuity)return 0;
+    capture->discontinuity=0;
+    return 1;
 }

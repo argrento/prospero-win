@@ -744,7 +744,8 @@ static NTSTATUS ps5_get_capture_buffer(void *args)
         return unlock_result(&params->result, AUDCLNT_S_BUFFER_EMPTY);
     }
 
-    *flags = 0;
+    /* frames were dropped since the last packet: the client may want to know */
+    *flags = pw_audio_capture_take_discontinuity(&stream->capture) ? AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY : 0;
     *frames = stream->period_frames;
     offset = stream->capture.offset;
 
@@ -784,13 +785,18 @@ static NTSTATUS ps5_get_capture_buffer(void *args)
     stream->getbuf_last = *frames;
     stream->capture.locked = *frames;
 
+    /* the packet's first frame: its position on the device's clock, and
+     * when it was captured, which is the newest frame's time less the
+     * frames made after it */
     if (devpos)
-        *devpos = stream->written_frames;
+        *devpos = stream->capture.head;
     if (qpcpos)
     {
         LARGE_INTEGER stamp, freq;
         NtQueryPerformanceCounter(&stamp, &freq);
-        *qpcpos = (stamp.QuadPart * (INT64)10000000) / freq.QuadPart;
+        *qpcpos = (stamp.QuadPart * (INT64)10000000) / freq.QuadPart -
+                  (INT64)((stream->capture.produced - stream->capture.head) * 10000000 /
+                          stream->capture.format.rate);
     }
 
     return unlock_result(&params->result, S_OK);
@@ -963,9 +969,10 @@ static NTSTATUS ps5_get_position(void *args)
 
     pthread_mutex_lock(&lock);
 
-    /* capture: the frames the client took, and those waiting for it */
+    /* capture: every frame the device made, dropped ones too, so the
+     * clock runs on while a client is late */
     if (stream->flow == eCapture)
-        *pos = stream->written_frames + stream->capture.held;
+        *pos = stream->capture.produced;
     else
         *pos = stream->written_frames - stream->mix.held;
     if (*pos < stream->last_pos_frames)

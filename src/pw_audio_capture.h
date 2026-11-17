@@ -19,6 +19,12 @@
  * ReleaseBuffer, `locked`), the oldest frames are the ones it reads, so a
  * new frame that finds the ring full is lost instead.
  *
+ * Every frame made has a position, counted from the last reset, dropped
+ * ones included, so a late client still sees the device's clock move:
+ * `produced` is the position after the newest frame, `head` the position
+ * of the oldest one held. A drop of either kind leaves a gap, which
+ * `discontinuity` notes until the driver reports it.
+ *
  * Portable: no allocation and no locking. The driver owns the ring and
  * serialises access to a stream. */
 
@@ -29,6 +35,8 @@ typedef struct PwAudioCapture {
     uint32_t offset,held;       /* the oldest unread frame, and how many there are */
     uint32_t locked;            /* frames from offset the client is reading */
     uint64_t written,dropped;   /* frames put in the ring, and frames lost to a full one */
+    uint64_t produced,head;     /* positions: after the newest frame, and of the oldest held */
+    int discontinuity;          /* frames were dropped since the driver last asked */
     uint32_t source_rate;       /* the microphone's, 0 until the first write */
     uint64_t step,phase;        /* source frames per client frame, and position: 32.32 */
     float previous,current;
@@ -46,5 +54,8 @@ uint32_t pw_audio_capture_write(PwAudioCapture *capture,const int16_t *samples,u
                                 uint32_t rate);
 /* The client is done with frames frames from offset (at most held). */
 void pw_audio_capture_consume(PwAudioCapture *capture,uint32_t frames);
+/* 1 once if frames were dropped since the last call (a packet's
+ * AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY), else 0. */
+int pw_audio_capture_take_discontinuity(PwAudioCapture *capture);
 
 #endif
