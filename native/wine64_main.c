@@ -935,9 +935,23 @@ static int microphone_open(void *context, uint32_t *rate)
     return pw_audio_in_ps5_open(&audio_in, rate) == PW_OK ? 0 : -1;
 }
 
+/* The main port's state as the capture thread last saw it: a game that
+ * records without playing never runs the sink's check, so the plug epoch
+ * also moves here. Only the capture thread reads or writes these. */
+static PwAudioRouteState microphone_port_seen;
+static uint32_t microphone_port_reads;
+
 static int microphone_read(void *context, int16_t *frames)
 {
     (void)context;
+    if (!(microphone_port_reads++ % PW_AUDIO_ROUTE_CHECK_GRAINS) && audio_port >= 0) {
+        const PwAudioRouteState state = pw_audio_ps5_port_state(&audio_ops, audio_port, NULL, NULL);
+        if (microphone_port_reads > 1 && (state.known != microphone_port_seen.known ||
+            state.output != microphone_port_seen.output ||
+            state.reroute_counter != microphone_port_seen.reroute_counter))
+            __atomic_add_fetch(&audio_plug_epoch, 1, __ATOMIC_RELEASE);
+        microphone_port_seen = state;
+    }
     return pw_audio_in_ps5_read(&audio_in, frames, __atomic_load_n(&audio_plug_epoch, __ATOMIC_ACQUIRE)) == PW_OK ? 0 : -1;
 }
 
