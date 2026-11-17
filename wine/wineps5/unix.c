@@ -920,7 +920,11 @@ static NTSTATUS ps5_get_current_padding(void *args)
 
     pthread_mutex_lock(&lock);
 
-    *params->padding = stream->flow == eCapture ? stream->capture.held : stream->mix.held;
+    /* capture: the size of the next packet, as GetNextPacketSize says */
+    if (stream->flow == eCapture)
+        *params->padding = stream->capture.held < stream->period_frames ? 0 : stream->period_frames;
+    else
+        *params->padding = stream->mix.held;
 
     return unlock_result(&params->result, S_OK);
 }
