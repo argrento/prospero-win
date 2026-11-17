@@ -29,7 +29,7 @@ Start any game with the new title shell, before anything else. Each title
 imports libSceAudioIn now.
 
 - The game starts, and the log has `PW_WINE64 microphone=ok user=<id>`.
-- `microphone=not_found` means the firmware did not resolve libSceAudioIn
+- `microphone=not-found` means the firmware did not resolve libSceAudioIn
   for the title. The title then lists no microphone and carries on. Note it:
   the module must then be loaded before the first call, and no module id for
   it is known yet.
