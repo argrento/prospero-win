@@ -24,7 +24,9 @@
  * reach the title after that, which shows them through the Vulkan driver
  * while no swapchain presents (a DirectShow movie drawn with GDI).
  * Sound goes out like frames: Wine's audio driver (wine/wineps5) hands its
- * mix to the title's one audio port, one grain at a time. */
+ * mix to the title's one audio port, one grain at a time. The microphone
+ * comes in the same way: the driver opens the title's input while a game
+ * captures and reads it a grain at a time. */
 
 /* BGRA, top-down; stride in bytes. Returns the sink's result. */
 typedef int (*PwWinePresentSink)(void *context,const void *bgra,uint32_t width,uint32_t height,
@@ -47,6 +49,19 @@ enum { PW_WINE_AUDIO_RATE=48000,PW_WINE_AUDIO_GRAIN=256 };
  * console's output clocks the caller. Returns the sink's result. */
 typedef int (*PwWineAudioSink)(void *context,const int16_t *frames);
 
+/* The console's microphone: 16-bit mono at the rate open gives,
+ * PW_WINE_AUDIO_INPUT_GRAIN frames a read. The title sets these calls only
+ * when the game may hear the microphone. open answers 0 and the rate, or
+ * a negative error; read blocks for one grain and answers 0, or a negative
+ * error (the driver then delivers silence); close ends it. The driver calls
+ * them from one thread. */
+enum { PW_WINE_AUDIO_INPUT_GRAIN=256 };
+typedef struct PwWineAudioInput {
+    int (*open)(void *context,uint32_t *rate);
+    int (*read)(void *context,int16_t *frames);
+    void (*close)(void *context);
+} PwWineAudioInput;
+
 /* Hands the video output over to a Vulkan display-plane surface; 0 once
  * the title no longer uses it. */
 typedef int (*PwWineDisplayRelease)(void *context);
@@ -61,6 +76,7 @@ typedef struct PwWineSinkStats {
     uint64_t inputs_posted,inputs_dropped,inputs_delivered;
     uint64_t grains,grains_dropped;       /* audio; dropped as for frames */
     uint32_t display_released;            /* 1 once Vulkan took the video output */
+    uint64_t input_grains,input_failed;   /* microphone grains read, and reads that failed */
 } PwWineSinkStats;
 
 /* XInput's controllers (XUSER_MAX_COUNT): 0 is the title's own user's
@@ -93,6 +109,9 @@ typedef struct PwWinePadExtra {
 /* Title side. */
 void pw_wine_set_present_sink(PwWinePresentSink sink,void *context);
 void pw_wine_set_audio_sink(PwWineAudioSink sink,void *context);
+/* The microphone's calls (copied), or NULL for none: the driver then lists
+ * no capture device. */
+void pw_wine_set_audio_input(const PwWineAudioInput *input,void *context);
 void pw_wine_set_display_release(PwWineDisplayRelease release,void *context);
 /* 0, or -1 when the queue is full or the event is invalid. */
 int pw_wine_post_input(const PwWineInput *event);
@@ -186,5 +205,17 @@ int pw_wine_audio_available(void);
 /* Blocks while the sink plays one grain. -1 when no sink is set or frames
  * is NULL. */
 int pw_wine_audio_output(const int16_t *frames);
+/* 1 when the title set a microphone: the driver lists its capture device
+ * only then. */
+int pw_wine_audio_input_available(void);
+/* Opens the microphone: 0 and its rate, -1 when there is none, it is already
+ * open or rate is NULL, else the title's error. */
+int pw_wine_audio_input_open(uint32_t *rate);
+/* Blocks while the title reads one grain of PW_WINE_AUDIO_INPUT_GRAIN mono
+ * frames: 0, -1 when it is not open or frames is NULL, else the title's
+ * error. */
+int pw_wine_audio_input_read(int16_t *frames);
+/* Closes the microphone if it is open. */
+void pw_wine_audio_input_close(void);
 
 #endif

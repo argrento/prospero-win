@@ -649,6 +649,8 @@ if [ "$prx_status" = 0 ]; then
         pw_wine_set_pad_at pw_wine_rumble_at pw_wine_rumble_peak_at pw_wine_pad_at pw_wine_pad_peek pw_wine_set_rumble_at pw_wine_pads_wanted pw_wine_pads_ask pw_wine_pad_notify \
         pw_wine_set_pad_extra pw_wine_pad_extra pw_wine_set_pad_extra_at pw_wine_pad_extra_at \
         pw_wine_set_audio_sink pw_wine_audio_available pw_wine_audio_output \
+        pw_wine_set_audio_input pw_wine_audio_input_available pw_wine_audio_input_open pw_wine_audio_input_read \
+        pw_wine_audio_input_close \
         __wine_virtual_stats __wine_virtual_fault_top __wine_ps5_set_output_sink __wine_ps5_memory_stats pw_cwd_set \
         __wine_ps5_set_segv_hook __wine_ps5_set_segv_unresolved_hook pw_wine_set_display_release pw_wine_release_display \
         pw_wine_set_notify pw_wine_notify pw_wine_set_invite pw_wine_invite_ask pw_wine_invite_answer \
@@ -739,7 +741,7 @@ if [ "$prx_status" = 0 ]; then
         include/unknwn.h include/wtypes.h include/oaidl.h >> "$work/make.log" 2>&1 ||
         fail "cannot generate mmdevapi's headers; see $work/make.log"
     audio=""
-    for unit in wine/wineps5/unix.c src/pw_audio_mix.c; do
+    for unit in wine/wineps5/unix.c src/pw_audio_mix.c src/pw_audio_capture.c src/pw_audio_endpoints.c; do
         object=$prx/obj/wineps5_$(basename "$unit" .c).o
         "$sdk/bin/prospero-clang" -std=gnu11 -O2 -fPIC -D__WINESRC__ -DWINE_UNIX_LIB -D_REENTRANT \
             -I"$build/include" -I"$tree/include" -I"$tree/dlls/mmdevapi" -I"$root/wine/ps5" \

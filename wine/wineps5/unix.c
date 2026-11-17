@@ -5,14 +5,25 @@
  *
  * mmdevapi loads it by name like any Wine audio driver: HKCU\Software\Wine\
  * Drivers\Audio = "ps5" (the in-process server's default on the PS5, patch
- * 0120). There is one render endpoint and no capture. Each stream keeps
- * mmdevapi's ring of frames in the format its client chose; one Unix
- * thread mixes every started stream into a grain of the console's format
+ * 0120). There is one render endpoint, "PS5", and one capture endpoint,
+ * "Microphone" (src/pw_audio_endpoints.h). Each stream keeps mmdevapi's
+ * ring of frames in the format its client chose; one Unix thread mixes
+ * every started render stream into a grain of the console's format
  * (src/pw_audio_mix.h) and hands it to the title's audio sink
  * (wine/ps5/pw_wine_sink.h), which returns once the console's port has
  * taken it, so the port is the clock. The sink is found with dlsym, as the
  * user driver finds pw_wine_present; without one the driver reports itself
  * unavailable.
+ *
+ * Capture is the other way round. The title's microphone is listed only
+ * when the title set one. While a capture stream is started, a second Unix
+ * thread holds the microphone open and reads it a grain at a time (the
+ * read blocks, so the microphone is capture's clock), converting each grain
+ * into every started capture stream's ring (src/pw_audio_capture.h). When
+ * the last capture stream stops, the thread closes the microphone, so the
+ * console's microphone is in use only while a game listens. That thread is
+ * the only one that opens, reads or closes it. A read that fails gives a
+ * grain of silence and a grain's wait, so a game never sees its device stop.
  *
  * The stream, buffer, timing and WoW64 code follows Wine's OSS driver
  * (dlls/wineoss.drv/oss.c, Copyright 2011 Andrew Eikum for CodeWeavers,
@@ -39,6 +50,8 @@
 
 #include "unixlib.h"
 
+#include "pw_audio_capture.h"
+#include "pw_audio_endpoints.h"
 #include "pw_audio_mix.h"
 #include "pw_wine_sink.h"
 
@@ -46,6 +59,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(ps5audio);
 
 struct ps5_stream
 {
+    EDataFlow flow;
     WAVEFORMATEX *fmt;
     AUDCLNT_SHAREMODE share;
     UINT flags;
@@ -60,26 +74,27 @@ struct ps5_stream
     BYTE *local_buffer, *tmp_buffer;
     INT32 getbuf_last; /* <0 when using tmp_buffer */
 
-    /* The ring: mix.offset is where valid data starts, mix.held how much. */
+    /* Render: the ring, mix.offset is where valid data starts, mix.held how
+     * much. Capture: the same in capture. */
     PwAudioMixStream mix;
+    PwAudioCapture capture;
     struct ps5_stream *next;
 };
 
 static const REFERENCE_TIME def_period = 100000;
 static const REFERENCE_TIME min_period = 50000;
-static const char device_name[] = "ps5";
-static const WCHAR endpoint_name[] = {'P','S','5',0};
 
 static ULONG_PTR zero_bits = 0;
 
-/* One lock for every stream: the mixer reads them all each grain. */
+/* One lock for every stream: the mixer reads every render stream each
+ * grain, the capture thread writes every capture stream. */
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t started = PTHREAD_COND_INITIALIZER;
-static struct ps5_stream *streams;
-static HANDLE mixer_thread;
+static pthread_cond_t capturing = PTHREAD_COND_INITIALIZER;
+static struct ps5_stream *streams, *captures;
+static HANDLE mixer_thread, capture_thread;
 
-static int (*audio_available)(void);
-static int (*audio_output)(const int16_t *frames);
+static PwAudioSinkCalls sink;
 
 static NTSTATUS ps5_not_implemented(void *args)
 {
@@ -122,17 +137,17 @@ static struct ps5_stream *handle_get_stream(stream_handle h)
     return (struct ps5_stream *)(UINT_PTR)h;
 }
 
+static void *lookup(const char *name)
+{
+    return dlsym(RTLD_DEFAULT, name);
+}
+
 /* The title's sink, exported by ntdll.prx on the console. */
 static void find_sink(void)
 {
-    if (audio_output) return;
-    audio_available = dlsym(RTLD_DEFAULT, "pw_wine_audio_available");
-    audio_output = dlsym(RTLD_DEFAULT, "pw_wine_audio_output");
-    if (!audio_available || !audio_output)
-    {
-        audio_available = NULL;
-        audio_output = NULL;
-    }
+    if (sink.output) return;
+    pw_audio_sink_find(&sink, lookup);
+    TRACE("output %d input %d\n", sink.output != NULL, sink.input_read != NULL);
 }
 
 static NTSTATUS ps5_process_attach(void *args)
@@ -146,25 +161,31 @@ static NTSTATUS ps5_test_connect(void *args)
     struct test_connect_params *params = args;
 
     find_sink();
-    params->priority = audio_available && audio_available() ? Priority_Preferred : Priority_Unavailable;
+    params->priority = sink.available && sink.available() ? Priority_Preferred : Priority_Unavailable;
     TRACE("priority %d\n", params->priority);
     return STATUS_SUCCESS;
 }
 
+static int endpoint_flow(EDataFlow flow)
+{
+    return flow == eCapture ? PW_AUDIO_FLOW_CAPTURE : flow == eRender ? PW_AUDIO_FLOW_RENDER : -1;
+}
+
 static BOOL is_device(const char *device, EDataFlow flow)
 {
-    return flow == eRender && device && !strcmp(device, device_name);
+    return pw_audio_endpoint_is(device, endpoint_flow(flow));
 }
 
 static NTSTATUS ps5_get_endpoint_ids(void *args)
 {
     struct get_endpoint_ids_params *params = args;
-    unsigned int num = params->flow == eRender ? 1 : 0;
+    PwAudioEndpoint endpoint;
+    unsigned int num = pw_audio_endpoints(&sink, endpoint_flow(params->flow), &endpoint);
     unsigned int offset, needed;
 
     offset = needed = num * sizeof(*params->endpoints);
     if (num)
-        needed += sizeof(endpoint_name) + ((sizeof(device_name) + 1) & ~1);
+        needed += ((endpoint.name_bytes + 1) & ~1) + ((endpoint.device_bytes + 1) & ~1);
 
     params->num = num;
     params->default_idx = 0;
@@ -177,10 +198,10 @@ static NTSTATUS ps5_get_endpoint_ids(void *args)
     if (num)
     {
         params->endpoints[0].name = offset;
-        memcpy((char *)params->endpoints + offset, endpoint_name, sizeof(endpoint_name));
-        offset += sizeof(endpoint_name);
+        memcpy((char *)params->endpoints + offset, endpoint.name, endpoint.name_bytes);
+        offset += (endpoint.name_bytes + 1) & ~1;
         params->endpoints[0].device = offset;
-        memcpy((char *)params->endpoints + offset, device_name, sizeof(device_name));
+        memcpy((char *)params->endpoints + offset, endpoint.device, endpoint.device_bytes);
     }
     params->result = S_OK;
     return STATUS_SUCCESS;
@@ -309,7 +330,10 @@ static NTSTATUS ps5_create_stream(void *args)
         params->result = E_OUTOFMEMORY;
         goto exit;
     }
-    if (pw_audio_mix_stream_init(&stream->mix, &format, stream->local_buffer, stream->bufsize_frames))
+    stream->flow = params->flow;
+    if (stream->flow == eCapture
+        ? pw_audio_capture_init(&stream->capture, &format, stream->local_buffer, stream->bufsize_frames)
+        : pw_audio_mix_stream_init(&stream->mix, &format, stream->local_buffer, stream->bufsize_frames))
     {
         params->result = AUDCLNT_E_UNSUPPORTED_FORMAT;
         goto exit;
@@ -318,9 +342,18 @@ static NTSTATUS ps5_create_stream(void *args)
     stream->share = params->share;
     stream->flags = params->flags;
 
+    /* the mixer walks render streams only, the capture thread capture ones */
     pthread_mutex_lock(&lock);
-    stream->next = streams;
-    streams = stream;
+    if (stream->flow == eCapture)
+    {
+        stream->next = captures;
+        captures = stream;
+    }
+    else
+    {
+        stream->next = streams;
+        streams = stream;
+    }
     pthread_mutex_unlock(&lock);
 
 exit:
@@ -340,9 +373,9 @@ static NTSTATUS ps5_release_stream(void *args)
     struct release_stream_params *params = args;
     struct ps5_stream *stream = handle_get_stream(params->stream), **link;
 
-    /* the mixer only touches streams under the lock */
+    /* the mixer and the capture thread only touch streams under the lock */
     pthread_mutex_lock(&lock);
-    for (link = &streams; *link; link = &(*link)->next)
+    for (link = stream->flow == eCapture ? &captures : &streams; *link; link = &(*link)->next)
         if (*link == stream)
         {
             *link = stream->next;
@@ -391,7 +424,7 @@ static void mixer_loop(void *args)
         pw_audio_mix_store(accumulator, grain, PW_WINE_AUDIO_GRAIN);
         pthread_mutex_unlock(&lock);
 
-        if (!audio_output || audio_output(grain))
+        if (!sink.output || sink.output(grain))
         {
             /* the port refused it: keep time without it */
             LARGE_INTEGER delay;
@@ -402,11 +435,93 @@ static void mixer_loop(void *args)
     }
 }
 
+/* Grains of silence while the microphone cannot be opened, before the
+ * next try: about a second. */
+enum { CAPTURE_RETRY_GRAINS = 188 };
+
+static void capture_wait(uint32_t rate)
+{
+    LARGE_INTEGER delay;
+
+    delay.QuadPart = -(LONGLONG)PW_WINE_AUDIO_INPUT_GRAIN * 10000000 / rate;
+    NtDelayExecution(FALSE, &delay);
+}
+
+/* The capture thread: the microphone open while a capture stream is
+ * started, one grain read at a time into every started capture stream. */
+static void capture_loop(void *args)
+{
+    static int16_t grain[PW_WINE_AUDIO_INPUT_GRAIN];
+    struct ps5_stream *stream;
+    uint32_t rate = PW_WINE_AUDIO_RATE, retry = 0;
+    BOOL open = FALSE, listening, heard;
+
+    pthread_mutex_lock(&lock);
+    for (;;)
+    {
+        listening = FALSE;
+        for (stream = captures; stream; stream = stream->next)
+            listening |= stream->playing;
+        if (!listening)
+        {
+            retry = 0;
+            if (open)
+            {
+                pthread_mutex_unlock(&lock);
+                sink.input_close();
+                TRACE("microphone closed\n");
+                pthread_mutex_lock(&lock);
+                open = FALSE;
+                continue;
+            }
+            pthread_cond_wait(&capturing, &lock);
+            continue;
+        }
+        pthread_mutex_unlock(&lock);
+
+        if (!open && !retry)
+        {
+            uint32_t opened = 0;
+            int status = sink.input_open(&opened);
+
+            open = !status && opened >= PW_AUDIO_MIX_MIN_RATE && opened <= PW_AUDIO_MIX_MAX_RATE;
+            if (open) rate = opened;
+            else
+            {
+                if (!status) sink.input_close();
+                retry = CAPTURE_RETRY_GRAINS;
+                rate = PW_WINE_AUDIO_RATE;
+            }
+            TRACE("microphone open status %d rate %u\n", status, opened);
+        }
+        else if (retry) retry--;
+        heard = open && !sink.input_read(grain);
+        /* no microphone data: silence, at the microphone's pace */
+        if (!heard) capture_wait(rate);
+
+        pthread_mutex_lock(&lock);
+        for (stream = captures; stream; stream = stream->next)
+        {
+            UINT32 made;
+
+            if (!stream->playing) continue;
+            made = pw_audio_capture_write(&stream->capture, heard ? grain : NULL, PW_WINE_AUDIO_INPUT_GRAIN, rate);
+            stream->since_event += made;
+            if (stream->since_event >= stream->period_frames)
+            {
+                stream->since_event %= stream->period_frames;
+                if (stream->event) NtSetEvent(stream->event, NULL);
+            }
+        }
+    }
+}
+
 static NTSTATUS ps5_start(void *args)
 {
     struct start_params *params = args;
     struct ps5_stream *stream = handle_get_stream(params->stream);
     static const WCHAR name[] = {'p','s','5','_','a','u','d','i','o','_','m','i','x','e','r',0};
+    static const WCHAR capture_name[] = {'p','s','5','_','a','u','d','i','o','_','c','a','p','t','u','r','e',0};
 
     pthread_mutex_lock(&lock);
 
@@ -416,6 +531,19 @@ static NTSTATUS ps5_start(void *args)
     if (stream->playing)
         return unlock_result(&params->result, AUDCLNT_E_NOT_STOPPED);
 
+    if (stream->flow == eCapture)
+    {
+        if (!sink.input_read) return unlock_result(&params->result, AUDCLNT_E_DEVICE_INVALIDATED);
+        if (!capture_thread && create_unix_thread(&capture_thread, capture_name, capture_loop, NULL))
+        {
+            capture_thread = NULL;
+            return unlock_result(&params->result, E_OUTOFMEMORY);
+        }
+        stream->playing = TRUE;
+        stream->since_event = 0;
+        pthread_cond_signal(&capturing);
+        return unlock_result(&params->result, S_OK);
+    }
     if (!mixer_thread && create_unix_thread(&mixer_thread, name, mixer_loop, NULL))
     {
         mixer_thread = NULL;
@@ -439,6 +567,8 @@ static NTSTATUS ps5_stop(void *args)
         return unlock_result(&params->result, S_FALSE);
 
     stream->playing = FALSE;
+    /* the capture thread closes the microphone once no stream listens */
+    if (stream->flow == eCapture) pthread_cond_signal(&capturing);
 
     return unlock_result(&params->result, S_OK);
 }
@@ -459,7 +589,8 @@ static NTSTATUS ps5_reset(void *args)
     stream->written_frames = 0;
     stream->last_pos_frames = 0;
     stream->since_event = 0;
-    pw_audio_mix_stream_reset(&stream->mix);
+    if (stream->flow == eCapture) pw_audio_capture_reset(&stream->capture);
+    else pw_audio_mix_stream_reset(&stream->mix);
 
     return unlock_result(&params->result, S_OK);
 }
@@ -479,6 +610,9 @@ static NTSTATUS ps5_get_render_buffer(void *args)
     SIZE_T size;
 
     pthread_mutex_lock(&lock);
+
+    if (stream->flow != eRender)
+        return unlock_result(&params->result, AUDCLNT_E_WRONG_ENDPOINT_TYPE);
 
     if (stream->getbuf_last)
         return unlock_result(&params->result, AUDCLNT_E_OUT_OF_ORDER);
@@ -549,6 +683,9 @@ static NTSTATUS ps5_release_render_buffer(void *args)
 
     pthread_mutex_lock(&lock);
 
+    if (stream->flow != eRender)
+        return unlock_result(&params->result, AUDCLNT_E_WRONG_ENDPOINT_TYPE);
+
     if (!written_frames)
     {
         stream->getbuf_last = 0;
@@ -580,6 +717,116 @@ static NTSTATUS ps5_release_render_buffer(void *args)
     return unlock_result(&params->result, S_OK);
 }
 
+/* A period of captured frames, straight from the ring or, where it wraps,
+ * copied into tmp_buffer. The frames stay in the ring (locked) until the
+ * client releases them. */
+static NTSTATUS ps5_get_capture_buffer(void *args)
+{
+    struct get_capture_buffer_params *params = args;
+    struct ps5_stream *stream = handle_get_stream(params->stream);
+    UINT64 *devpos = params->devpos, *qpcpos = params->qpcpos;
+    UINT32 *frames = params->frames, offset;
+    UINT *flags = params->flags;
+    BYTE **data = params->data;
+    SIZE_T size;
+
+    pthread_mutex_lock(&lock);
+
+    if (stream->flow != eCapture)
+        return unlock_result(&params->result, AUDCLNT_E_WRONG_ENDPOINT_TYPE);
+
+    if (stream->getbuf_last)
+        return unlock_result(&params->result, AUDCLNT_E_OUT_OF_ORDER);
+
+    if (stream->capture.held < stream->period_frames)
+    {
+        *frames = 0;
+        return unlock_result(&params->result, AUDCLNT_S_BUFFER_EMPTY);
+    }
+
+    *flags = 0;
+    *frames = stream->period_frames;
+    offset = stream->capture.offset;
+
+    if (offset + *frames > stream->bufsize_frames)
+    {
+        UINT32 chunk_bytes, offs_bytes, frames_bytes;
+
+        if (stream->tmp_buffer_frames < *frames)
+        {
+            if (stream->tmp_buffer)
+            {
+                size = 0;
+                NtFreeVirtualMemory(GetCurrentProcess(), (void **)&stream->tmp_buffer, &size, MEM_RELEASE);
+                stream->tmp_buffer = NULL;
+            }
+            size = *frames * stream->fmt->nBlockAlign;
+            if (NtAllocateVirtualMemory(GetCurrentProcess(), (void **)&stream->tmp_buffer, zero_bits,
+                                        &size, MEM_COMMIT, PAGE_READWRITE))
+            {
+                stream->tmp_buffer_frames = 0;
+                *frames = 0;
+                return unlock_result(&params->result, E_OUTOFMEMORY);
+            }
+            stream->tmp_buffer_frames = *frames;
+        }
+
+        *data = stream->tmp_buffer;
+        chunk_bytes = (stream->bufsize_frames - offset) * stream->fmt->nBlockAlign;
+        offs_bytes = offset * stream->fmt->nBlockAlign;
+        frames_bytes = *frames * stream->fmt->nBlockAlign;
+        memcpy(stream->tmp_buffer, stream->local_buffer + offs_bytes, chunk_bytes);
+        memcpy(stream->tmp_buffer + chunk_bytes, stream->local_buffer, frames_bytes - chunk_bytes);
+    }
+    else
+        *data = stream->local_buffer + offset * stream->fmt->nBlockAlign;
+
+    stream->getbuf_last = *frames;
+    stream->capture.locked = *frames;
+
+    if (devpos)
+        *devpos = stream->written_frames;
+    if (qpcpos)
+    {
+        LARGE_INTEGER stamp, freq;
+        NtQueryPerformanceCounter(&stamp, &freq);
+        *qpcpos = (stamp.QuadPart * (INT64)10000000) / freq.QuadPart;
+    }
+
+    return unlock_result(&params->result, S_OK);
+}
+
+static NTSTATUS ps5_release_capture_buffer(void *args)
+{
+    struct release_capture_buffer_params *params = args;
+    struct ps5_stream *stream = handle_get_stream(params->stream);
+    UINT32 done = params->done;
+
+    pthread_mutex_lock(&lock);
+
+    if (stream->flow != eCapture)
+        return unlock_result(&params->result, AUDCLNT_E_WRONG_ENDPOINT_TYPE);
+
+    if (!done)
+    {
+        stream->getbuf_last = 0;
+        stream->capture.locked = 0;
+        return unlock_result(&params->result, S_OK);
+    }
+
+    if (!stream->getbuf_last)
+        return unlock_result(&params->result, AUDCLNT_E_OUT_OF_ORDER);
+
+    if (stream->getbuf_last != done)
+        return unlock_result(&params->result, AUDCLNT_E_INVALID_SIZE);
+
+    stream->written_frames += done;
+    pw_audio_capture_consume(&stream->capture, done);
+    stream->getbuf_last = 0;
+
+    return unlock_result(&params->result, S_OK);
+}
+
 static NTSTATUS ps5_is_format_supported(void *args)
 {
     struct is_format_supported_params *params = args;
@@ -592,7 +839,8 @@ static NTSTATUS ps5_is_format_supported(void *args)
     return STATUS_SUCCESS;
 }
 
-/* What the mixer adds in: float stereo at the console's rate. */
+/* What the mixer adds in: float stereo at the console's rate. The
+ * microphone is mono: float mono at the same rate. */
 static NTSTATUS ps5_get_mix_format(void *args)
 {
     struct get_mix_format_params *params = args;
@@ -600,19 +848,20 @@ static NTSTATUS ps5_get_mix_format(void *args)
 
     if (!is_device(params->device, params->flow))
     {
-        params->result = params->flow == eRender ? AUDCLNT_E_DEVICE_INVALIDATED : E_UNEXPECTED;
+        params->result = params->flow == eRender || params->flow == eCapture ? AUDCLNT_E_DEVICE_INVALIDATED
+                                                                               : E_UNEXPECTED;
         return STATUS_SUCCESS;
     }
 
     fmt->Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
-    fmt->Format.nChannels = 2;
+    fmt->Format.nChannels = params->flow == eCapture ? 1 : 2;
     fmt->Format.nSamplesPerSec = PW_WINE_AUDIO_RATE;
     fmt->Format.wBitsPerSample = 32;
     fmt->Format.nBlockAlign = fmt->Format.nChannels * fmt->Format.wBitsPerSample / 8;
     fmt->Format.nAvgBytesPerSec = fmt->Format.nSamplesPerSec * fmt->Format.nBlockAlign;
     fmt->Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
     fmt->Samples.wValidBitsPerSample = fmt->Format.wBitsPerSample;
-    fmt->dwChannelMask = KSAUDIO_SPEAKER_STEREO;
+    fmt->dwChannelMask = params->flow == eCapture ? KSAUDIO_SPEAKER_MONO : KSAUDIO_SPEAKER_STEREO;
     fmt->SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
 
     params->result = S_OK;
@@ -665,7 +914,7 @@ static NTSTATUS ps5_get_current_padding(void *args)
 
     pthread_mutex_lock(&lock);
 
-    *params->padding = stream->mix.held;
+    *params->padding = stream->flow == eCapture ? stream->capture.held : stream->mix.held;
 
     return unlock_result(&params->result, S_OK);
 }
@@ -677,7 +926,9 @@ static NTSTATUS ps5_get_next_packet_size(void *args)
 
     pthread_mutex_lock(&lock);
 
-    *params->frames = stream->mix.held < stream->period_frames ? 0 : stream->period_frames;
+    UINT32 held = stream->flow == eCapture ? stream->capture.held : stream->mix.held;
+
+    *params->frames = held < stream->period_frames ? 0 : stream->period_frames;
 
     return unlock_result(&params->result, S_OK);
 }
@@ -712,7 +963,11 @@ static NTSTATUS ps5_get_position(void *args)
 
     pthread_mutex_lock(&lock);
 
-    *pos = stream->written_frames - stream->mix.held;
+    /* capture: the frames the client took, and those waiting for it */
+    if (stream->flow == eCapture)
+        *pos = stream->written_frames + stream->capture.held;
+    else
+        *pos = stream->written_frames - stream->mix.held;
     if (*pos < stream->last_pos_frames)
         *pos = stream->last_pos_frames;
     stream->last_pos_frames = *pos;
@@ -737,6 +992,8 @@ static NTSTATUS ps5_set_volumes(void *args)
     float gain[PW_AUDIO_MIX_MAX_CHANNELS];
     UINT16 i;
 
+    /* the microphone has no gain: a capture stream's volume is ignored */
+    if (stream->flow == eCapture) return STATUS_SUCCESS;
     pthread_mutex_lock(&lock);
     for (i = 0; i < stream->mix.format.channels; ++i)
         gain[i] = params->master_volume * params->volumes[i] * params->session_volumes[i];
@@ -775,7 +1032,7 @@ static NTSTATUS ps5_set_sample_rate(void *args)
 
     pthread_mutex_lock(&lock);
 
-    if (!(stream->flags & AUDCLNT_STREAMFLAGS_RATEADJUST))
+    if (!(stream->flags & AUDCLNT_STREAMFLAGS_RATEADJUST) || stream->flow != eRender)
         return unlock_result(&params->result, AUDCLNT_E_UNSUPPORTED_FORMAT);
     if (params->rate < PW_AUDIO_MIX_MIN_RATE || params->rate > PW_AUDIO_MIX_MAX_RATE)
         return unlock_result(&params->result, E_INVALIDARG);
@@ -866,8 +1123,8 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     ps5_reset,
     ps5_get_render_buffer,
     ps5_release_render_buffer,
-    ps5_not_implemented,
-    ps5_not_implemented,
+    ps5_get_capture_buffer,
+    ps5_release_capture_buffer,
     ps5_is_format_supported,
     ps5_not_implemented,
     ps5_get_mix_format,
@@ -1017,6 +1274,34 @@ static NTSTATUS ps5_wow64_get_render_buffer(void *args)
         .data = &data
     };
     ps5_get_render_buffer(&params);
+    params32->result = params.result;
+    *(unsigned int *)ULongToPtr(params32->data) = PtrToUlong(data);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS ps5_wow64_get_capture_buffer(void *args)
+{
+    struct
+    {
+        stream_handle stream;
+        HRESULT result;
+        PTR32 data;
+        PTR32 frames;
+        PTR32 flags;
+        PTR32 devpos;
+        PTR32 qpcpos;
+    } *params32 = args;
+    BYTE *data = NULL;
+    struct get_capture_buffer_params params =
+    {
+        .stream = params32->stream,
+        .data = &data,
+        .frames = ULongToPtr(params32->frames),
+        .flags = ULongToPtr(params32->flags),
+        .devpos = ULongToPtr(params32->devpos),
+        .qpcpos = ULongToPtr(params32->qpcpos)
+    };
+    ps5_get_capture_buffer(&params);
     params32->result = params.result;
     *(unsigned int *)ULongToPtr(params32->data) = PtrToUlong(data);
     return STATUS_SUCCESS;
@@ -1338,8 +1623,8 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     ps5_reset,
     ps5_wow64_get_render_buffer,
     ps5_release_render_buffer,
-    ps5_not_implemented,
-    ps5_not_implemented,
+    ps5_wow64_get_capture_buffer,
+    ps5_release_capture_buffer,
     ps5_wow64_is_format_supported,
     ps5_not_implemented,
     ps5_wow64_get_mix_format,

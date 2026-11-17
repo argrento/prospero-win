@@ -139,6 +139,69 @@ static int audio_sink(void *context,const int16_t *frames)
     return audio_fail?-3:0;
 }
 
+static int input_opens,input_reads,input_closes,input_fail_open,input_fail_read;
+static void *input_seen;
+static int input_open_call(void *context,uint32_t *rate)
+{
+    input_seen=context;input_opens++;
+    if(input_fail_open)return -7;
+    *rate=16000;return 0;
+}
+static int input_read_call(void *context,int16_t *frames)
+{
+    assert(context==input_seen);input_reads++;
+    for(int i=0;i<PW_WINE_AUDIO_INPUT_GRAIN;i++)frames[i]=(int16_t)(i-5);
+    return input_fail_read?-9:0;
+}
+static void input_close_call(void *context){assert(context==input_seen);input_closes++;}
+
+/* The microphone: only while set, open once, reads only while open. */
+static void test_audio_input(void)
+{
+    int tag;
+    uint32_t rate=0;
+    int16_t grain[PW_WINE_AUDIO_INPUT_GRAIN];
+    PwWineSinkStats s;
+    const PwWineAudioInput input={input_open_call,input_read_call,input_close_call};
+    PwWineAudioInput partial=input;partial.close=NULL;
+
+    assert(!pw_wine_audio_input_available());
+    assert(pw_wine_audio_input_open(&rate)==-1 && input_opens==0);
+    assert(pw_wine_audio_input_read(grain)==-1 && input_reads==0);
+    pw_wine_audio_input_close();
+    assert(input_closes==0);
+    pw_wine_set_audio_input(&partial,&tag);
+    assert(!pw_wine_audio_input_available());
+
+    pw_wine_set_audio_input(&input,&tag);
+    assert(pw_wine_audio_input_available());
+    assert(pw_wine_audio_input_read(grain)==-1 && input_reads==0);   /* not open yet */
+    assert(pw_wine_audio_input_open(NULL)==-1 && input_opens==0);
+    input_fail_open=1;
+    assert(pw_wine_audio_input_open(&rate)==-7 && input_opens==1 && rate==0);
+    assert(pw_wine_audio_input_read(grain)==-1);
+    input_fail_open=0;
+    assert(pw_wine_audio_input_open(&rate)==0 && rate==16000 && input_seen==&tag);
+    assert(pw_wine_audio_input_open(&rate)==-1 && input_opens==2);     /* already open */
+    assert(pw_wine_audio_input_read(grain)==0 && grain[0]==-5 && grain[255]==250 && input_reads==1);
+    assert(pw_wine_audio_input_read(NULL)==-1 && input_reads==1);
+    input_fail_read=1;
+    assert(pw_wine_audio_input_read(grain)==-9 && input_reads==2);
+    input_fail_read=0;
+    pw_wine_sink_stats(&s);
+    assert(s.input_grains==1 && s.input_failed==5);
+    pw_wine_audio_input_close();
+    assert(input_closes==1);
+    pw_wine_audio_input_close();
+    assert(input_closes==1);
+    assert(pw_wine_audio_input_read(grain)==-1);
+    /* reopened, then the title takes the microphone away: it is closed */
+    assert(pw_wine_audio_input_open(&rate)==0);
+    pw_wine_set_audio_input(NULL,NULL);
+    assert(input_closes==2 && !pw_wine_audio_input_available());
+    assert(pw_wine_audio_input_open(&rate)==-1 && input_opens==3);
+}
+
 static void test_audio(void)
 {
     int16_t grain[2*PW_WINE_AUDIO_GRAIN];
@@ -336,6 +399,7 @@ int main(void)
     fail_next=1;assert(pw_wine_present(frame,4,3,16)==-7 && calls==2);
     pw_wine_sink_stats(&s);assert(s.frames==1 && s.frames_dropped==5);
     test_audio();
+    test_audio_input();
 
     /* Input is first in, first out, validated, and bounded. */
     PwWineInput e,out;

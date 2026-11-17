@@ -39,6 +39,13 @@ static pthread_mutex_t audio_lock=PTHREAD_MUTEX_INITIALIZER;
 static PwWineAudioSink audio_sink;
 static void *audio_context;
 static uint64_t grains,grains_dropped;
+/* The microphone has its own: a read blocks for a grain, which must not
+ * hold up the output. Only the driver's capture thread calls in. */
+static pthread_mutex_t input_lock=PTHREAD_MUTEX_INITIALIZER;
+static PwWineAudioInput audio_input;
+static void *input_context;
+static int input_set,input_open;
+static uint64_t input_grains,input_failed;
 
 static void create_wake_pipe(void)
 {
@@ -172,6 +179,52 @@ int pw_wine_audio_output(const int16_t *frames)
     return status;
 }
 
+void pw_wine_set_audio_input(const PwWineAudioInput *input,void *context)
+{
+    pthread_mutex_lock(&input_lock);
+    if(input_set && input_open && audio_input.close)audio_input.close(input_context);
+    input_open=0;
+    input_set=input && input->open && input->read && input->close;
+    if(input_set){audio_input=*input;input_context=context;}
+    else{memset(&audio_input,0,sizeof(audio_input));input_context=NULL;}
+    pthread_mutex_unlock(&input_lock);
+}
+int pw_wine_audio_input_available(void)
+{
+    pthread_mutex_lock(&input_lock);
+    int available=input_set;
+    pthread_mutex_unlock(&input_lock);
+    return available;
+}
+int pw_wine_audio_input_open(uint32_t *rate)
+{
+    int status=-1;
+    pthread_mutex_lock(&input_lock);
+    if(input_set && !input_open && rate) {
+        status=audio_input.open(input_context,rate);
+        input_open=status==0;
+    }
+    pthread_mutex_unlock(&input_lock);
+    return status;
+}
+int pw_wine_audio_input_read(int16_t *frames)
+{
+    int status=-1;
+    pthread_mutex_lock(&input_lock);
+    if(input_set && input_open && frames)status=audio_input.read(input_context,frames);
+    if(status)input_failed++;
+    else input_grains++;
+    pthread_mutex_unlock(&input_lock);
+    return status;
+}
+void pw_wine_audio_input_close(void)
+{
+    pthread_mutex_lock(&input_lock);
+    if(input_set && input_open)audio_input.close(input_context);
+    input_open=0;
+    pthread_mutex_unlock(&input_lock);
+}
+
 void pw_wine_sink_stats(PwWineSinkStats *out)
 {
     if(!out)return;
@@ -181,6 +234,9 @@ void pw_wine_sink_stats(PwWineSinkStats *out)
     pthread_mutex_lock(&audio_lock);
     out->grains=grains;out->grains_dropped=grains_dropped;
     pthread_mutex_unlock(&audio_lock);
+    pthread_mutex_lock(&input_lock);
+    out->input_grains=input_grains;out->input_failed=input_failed;
+    pthread_mutex_unlock(&input_lock);
 }
 
 /* The pad has its own fields compared, not memcmp'd: padding stays out. */

@@ -714,7 +714,10 @@ means no audio.
 `wine/wineps5/unix.c` is the driver's Unix side, built and linked by the PRX
 stage like `wowprospero.prx`. Its stream, buffer and WoW64 code follows
 Wine's OSS driver.
-- It offers one render endpoint, `PS5`, and no capture.
+- It offers one render endpoint, `PS5`, and one capture endpoint,
+  `Microphone`, each its flow's default (`src/pw_audio_endpoints.h`). The
+  capture endpoint is listed only when the title set a microphone with
+  `pw_wine_set_audio_input`.
 - Its mix format is 48 kHz float stereo. A stream may use any PCM or float
   format `src/pw_audio_mix.h` decodes: winmm and dsound open theirs with
   `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`.
@@ -727,6 +730,16 @@ Wine's OSS driver.
   therefore the clock, and each stream's event is set once per period.
 - It reports itself unavailable when the title set no sink, so mmdevapi
   offers no device.
+- Capture streams have their own Unix thread. It opens the title's
+  microphone (`pw_wine_audio_input_open`) when the first capture stream
+  starts, reads it a grain of 16-bit mono at a time
+  (`pw_wine_audio_input_read`, which blocks, so the microphone clocks
+  capture), and closes it when the last one stops. Each grain is resampled
+  and encoded into every started capture stream's ring
+  (`src/pw_audio_capture.h`); a full ring drops its oldest frames. A read
+  that fails gives a grain of silence, so a game never sees its device
+  stop. The mix format of the microphone is 48 kHz float mono. WASAPI,
+  DirectSound capture and winmm `waveIn` all sit on mmdevapi.
 
 To use it on the console, stage `wineps5.prx` beside `ntdll.prx`. The game
 log then shows `PW_WINE64 audio sink=1 port=<handle> status=ok`.
