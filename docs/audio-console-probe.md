@@ -72,7 +72,10 @@ seconds). Speak while it records. It plays the recording back.
 2. For each run, copy `audio_capture_lab.txt` (endpoints, mix format, frames,
    peak and RMS) and these log lines:
    - `PW_WINE64 microphone open first user=… type=… rate=…` and
-     `… result=…`: which open the system took.
+     `… result=…`: which open the system took. If every attempt is
+     refused, note the results: the output port opens only under the
+     console's umask 0, and the microphone may need the same, which the
+     title cannot set safely while the game runs.
    - `PW_WINE64 microphone silent=…`: the silent state.
    - `PW_WINE64 microphone close reads=… failures=… reopens=…`.
 3. Start a recording with only the DualSense. Plug in a headset halfway

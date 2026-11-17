@@ -924,21 +924,15 @@ static void microphone_log(const char *line)
     PS5LOG_LOG("PW_WINE64 microphone %s", line);
 }
 
+/* The output port opens only under the console's umask 0 (see the sink),
+ * but the microphone opens while the game runs, and the umask is the
+ * process's: lowering it then would widen the mode of files other threads
+ * make in that moment. It is opened under the private umask; if the console
+ * refuses it there, the log shows each attempt's answer. */
 static int microphone_open(void *context, uint32_t *rate)
 {
     (void)context;
-    int status = pw_audio_in_ps5_open(&audio_in, rate);
-    /* The output port opens only under the console's umask 0 (see the
-     * sink); if the microphone refuses every attempt, it is tried once
-     * more under it. The umask is the process's: files other threads make
-     * in that moment get the wider mode. */
-    if (status == PW_ERR_STATE && per_game_mode) {
-        const int mask = pw_title_ps5_umask(0);
-        status = pw_audio_in_ps5_open(&audio_in, rate);
-        if (mask >= 0) (void)pw_title_ps5_umask((unsigned)mask);
-        PS5LOG_LOG("PW_WINE64 microphone open under umask 0 status=%s", pw_result_name(status));
-    }
-    return status == PW_OK ? 0 : -1;
+    return pw_audio_in_ps5_open(&audio_in, rate) == PW_OK ? 0 : -1;
 }
 
 static int microphone_read(void *context, int16_t *frames)
