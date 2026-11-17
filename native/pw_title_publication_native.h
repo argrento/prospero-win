@@ -35,6 +35,12 @@ typedef struct PwTitlePublicationPlatform {
      * and the game is checked there with no search: it can verify the game while
      * a copy on another drive would make the title refuse. NULL searches. */
     const char *known_game_mount;
+    /* Nonzero checks the modes a title shell older than publication-open-modes
+     * wants: the launcher's folders 0700, the lock, receipt, profiles, input
+     * and game-launch.json 0600, user.reg 0600 or 0644. A launcher sets it to
+     * predict what such a title will admit. Zero (the title itself) admits any
+     * mode of the owner's. */
+    int strict_modes;
 } PwTitlePublicationPlatform;
 
 typedef struct PwTitlePublicationDescriptor {

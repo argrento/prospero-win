@@ -148,6 +148,7 @@ static int checked_directory(const PwTitlePublicationPlatform *platform,
     char path[PW_TITLE_PUBLICATION_NATIVE_PATH * 2]; struct stat info;
     if (mapped_path(platform, console, path, sizeof(path)) || !no_symlink_ancestors(path) ||
         lstat(path, &info) || !S_ISDIR(info.st_mode) || S_ISLNK(info.st_mode) ||
+        (wanted == PW_ANY_MODE && platform->strict_modes && (info.st_mode & 07777) != 0700) ||
         (wanted != PW_ANY_MODE && (info.st_mode & 07777) != wanted) ||
         info.st_uid != (uid_t)platform->owner_uid) return 0;
     if (output) *output = identity(&info);
@@ -181,13 +182,19 @@ static int directory_unchanged(const PwTitlePublicationPlatform *platform,
  * on the console runs as the same user, so modes protect nothing there, and the launcher keeps its data
  * open so the console owner can delete it over FTP. dxvk.conf in an owned game folder (READ_LEGACY) is
  * 0600 or 0644, as that folder's start check wants. A file in an unowned game folder may have any owner
- * and mode. */
+ * and mode. With strict_modes, READ_PRIVATE is 0600 and READ_BOTTLE 0600 or 0644, as before
+ * publication-open-modes. */
 enum { READ_PRIVATE = 0, READ_LEGACY = 1, READ_GAME_UNOWNED = 2, READ_BOTTLE = 3 };
 
-static int admitted_mode(mode_t actual, int legacy)
+static int admitted_mode(const PwTitlePublicationPlatform *platform, mode_t actual, int legacy)
 {
     mode_t permission = actual & 07777;
-    return legacy != READ_LEGACY || permission == 0600 || permission == 0644;
+    switch (legacy) {
+    case READ_GAME_UNOWNED: return 1;
+    case READ_PRIVATE: return !platform->strict_modes || permission == 0600;
+    case READ_BOTTLE: return !platform->strict_modes || permission == 0600 || permission == 0644;
+    default: return permission == 0600 || permission == 0644;   /* READ_LEGACY */
+    }
 }
 
 static uint8_t *read_regular(const PwTitlePublicationPlatform *platform, const char *console,
@@ -199,7 +206,7 @@ static uint8_t *read_regular(const PwTitlePublicationPlatform *platform, const c
         !no_symlink_ancestors(path) || lstat(path, &before) || !S_ISREG(before.st_mode) ||
         S_ISLNK(before.st_mode) ||
         (legacy_mode != READ_GAME_UNOWNED && before.st_uid != (uid_t)platform->owner_uid) ||
-        before.st_nlink != 1 || !admitted_mode(before.st_mode, legacy_mode) ||
+        before.st_nlink != 1 || !admitted_mode(platform, before.st_mode, legacy_mode) ||
         before.st_size < 0 || (uint64_t)before.st_size > maximum) return NULL;
     fd = open(path, O_RDONLY | O_NOFOLLOW);
     if (fd < 0 || fstat(fd, &opened) || !same_identity(identity(&before), identity(&opened))) goto done;
@@ -653,7 +660,8 @@ static int verify_publication(const PwTitlePublicationDescriptor *before,
     if (!checked_directory(platform, control, PW_ANY_MODE, &control_before) ||
         mapped_path(platform, lock_path, host_lock, sizeof(host_lock)) || !no_symlink_ancestors(host_lock) ||
         lstat(host_lock, &info) || !S_ISREG(info.st_mode) || S_ISLNK(info.st_mode) ||
-        info.st_uid != (uid_t)platform->owner_uid || info.st_nlink != 1)
+        info.st_uid != (uid_t)platform->owner_uid || info.st_nlink != 1 ||
+        (platform->strict_modes && (info.st_mode & 07777) != 0600))
         return failure(error, error_size, "publication lock refused");
     lock_before = identity(&info);
     lock_fd = borrowed_fd >= 0 ? borrowed_fd : open(host_lock, O_RDONLY | O_NOFOLLOW);

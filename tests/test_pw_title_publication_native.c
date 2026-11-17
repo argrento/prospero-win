@@ -333,6 +333,32 @@ static void filesystem_and_registry_contract(void)
         CHECK(unlink(real) == 0 && rename(moved, real) == 0);
     }
     fixture_refresh(&f);
+    /* strict_modes predicts a title shell older than publication-open-modes: each opened folder or file
+     * is refused again, and user.reg may still be 0644. */
+    path(mapped, sizeof(mapped), &f, "/data/playden/games/install-220/.playden-control");
+    CHECK(chmod(mapped, 0700) == 0);
+    f.platform.strict_modes = 1;
+    CHECK(admit(&f, &lease) == 0); pw_title_publication_close(&lease);
+    {
+        static const struct { const char *path; mode_t opened, private_mode; int admitted; } cases[] = {
+            {"/data/playden/games/install-220/library/profiles", 0755, 0700, 0},
+            {"/data/playden/games/install-220/library/prefixes/game", 0777, 0700, 0},
+            {"/data/playden/games/install-220/.playden-control", 0777, 0700, 0},
+            {"/data/playden/games/install-220/.playden-control/publication.lock", 0644, 0600, 0},
+            {"/data/playden/games/install-220/library/prefixes/game/user.reg", 0666, 0600, 0},
+            {"/data/playden/games/install-220/library/prefixes/game/user.reg", 0644, 0600, 1},
+            {"/data/homebrew/FAKE78001/game-launch.json", 0644, 0600, 0},
+        };
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+            path(mapped, sizeof(mapped), &f, cases[i].path);
+            CHECK(chmod(mapped, cases[i].opened) == 0);
+            if (cases[i].admitted) { CHECK(admit(&f, &lease) == 0); pw_title_publication_close(&lease); }
+            else CHECK(admit(&f, &lease) != 0);
+            CHECK(chmod(mapped, cases[i].private_mode) == 0);
+            fixture_refresh(&f);
+        }
+    }
+    f.platform.strict_modes = 0;
 
     read_file(&f, "/data/playden/games/install-220/library/prefixes/game/user.reg", text, sizeof(text));
     text[0] = 'X';
