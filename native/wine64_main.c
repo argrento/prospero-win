@@ -1953,6 +1953,7 @@ int main(int argc, char **argv)
     int osk_status = PW_ERR_STATE;
     uint64_t vibrations = 0;
     int pad_seen = -1;
+    int pad_arrived = 0;   /* the title's controller has been connected */
     uint64_t shown_sequence = 0, shown = 0, posted = 0, refused = 0;
     VulkanFrames vulkan_frames = { 0 };
     Loading loading = { 0 };
@@ -2909,6 +2910,12 @@ int main(int argc, char **argv)
             int connected = set_pad_extra ?
                             pw_wine_game_pad_playstation(pad_read ? seen : NULL, &state, &extra_state) :
                             pw_wine_game_pad(pad_read ? seen : NULL, &state), scripted = 0;
+            /* Until it first comes, the title's controller is there, idle:
+             * a game that looks for controllers only at its start (SDL)
+             * would miss one bridged in later. */
+            if (pad_read)
+                connected = pw_wine_pad_until_first(&pad, connected, &pad_arrived, &state,
+                                                    set_pad_extra ? &extra_state : NULL);
             /* The other preset's controller, idle under this one. It stays
              * connected: a game may pause when a controller goes. */
             if (connected && !is_pad_mode(game_input.mode)) {

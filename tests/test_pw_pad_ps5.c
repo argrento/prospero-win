@@ -27,8 +27,10 @@ static int vibration_mode_calls,vibration_mode_seen;
 static int pad_set_vibration_mode(int32_t h,int32_t m)
 {assert(h==7);vibration_mode_calls++;vibration_mode_seen=m;return 0;}
 static const PwPadPs5Ops ops={user_initialize,foreground,terminate,pad_init,pad_open,pad_read,pad_close,
-                              pad_set_vibration,login_users,pad_set_vibration_mode};
+                              pad_set_vibration,login_users,pad_set_vibration_mode,NULL};
 enum { CREATE=0x1,L1=0x400,TOUCHPAD=0x100000 };
+static int menu_open;
+static int system_ui_overlaid(void){return menu_open;}
 static const PwPadKeyMap map[]={{L1,'Z',0,0,"left-flipper"}};
 
 int main(void)
@@ -177,5 +179,46 @@ int main(void)
     first.ops.login_users=login_users;
     assert(pw_pad_ps5_close(&first)==PW_OK && terminate_calls==terminated+1);
     assert(pw_pad_ps5_open_other(&second,&first,-1,map,1)==PW_ERR_PRECONDITION);
+
+    /* A system menu over the title has the pad even when its samples carry
+     * no intercepted mark (a bridged DualShock 4), and keeps it until the
+     * buttons that closed the menu are up. */
+    {
+        PwPadPs5Ops menu_ops=ops;menu_ops.system_ui_overlaid=system_ui_overlaid;
+        PwPadPs5 held;read_rc=0;
+        assert(pw_pad_ps5_open(&held,&menu_ops,map,1)==PW_OK);
+        fixture[0]=(PwPadPs5Data){.buttons=L1,.connected=1,.timestamp=5000,.connected_count=1};
+        fixture_count=1;assert(pw_pad_ps5_read(&held)==PW_OK && held.core.pressed_edges==L1);
+        /* The menu opens: L1 comes up, a press is the menu's, the game sees an idle pad. */
+        menu_open=1;fixture[0].buttons=L1|CREATE;
+        assert(pw_pad_ps5_read(&held)==PW_OK && held.intercepted && !held.core.connected);
+        assert(held.core.released_edges==L1 && !held.core.pressed_edges && !held.core.previous_buttons);
+        /* An idle pad reads nothing new: still the menu's. */
+        fixture_count=0;assert(pw_pad_ps5_read(&held)==PW_OK && held.intercepted && !held.core.pressed_edges);
+        /* The menu closes with Cross still down: not the game's until it is up. */
+        menu_open=0;fixture_count=1;fixture[0].buttons=CREATE;
+        assert(pw_pad_ps5_read(&held)==PW_OK && held.intercepted && !held.core.pressed_edges && held.menu_hold);
+        /* An older neutral sample ahead of the press doesn't end the hold. */
+        fixture_count=2;fixture[0].buttons=0;fixture[1]=fixture[0];fixture[1].buttons=CREATE;
+        assert(pw_pad_ps5_read(&held)==PW_OK && held.intercepted && !held.core.pressed_edges && held.menu_hold);
+        /* Buttons up in the newest sample: that read is still the menu's, the next is the game's. */
+        fixture_count=1;fixture[0].buttons=0;
+        assert(pw_pad_ps5_read(&held)==PW_OK && held.intercepted && !held.menu_hold && !held.core.pressed_edges);
+        assert(pw_pad_ps5_read(&held)==PW_OK && !held.intercepted && held.core.connected);
+        fixture[0].buttons=CREATE;
+        assert(pw_pad_ps5_read(&held)==PW_OK && held.core.pressed_edges==CREATE);
+        /* A pad that goes while the menu is up is gone, not idle. */
+        menu_open=1;fixture[0]=(PwPadPs5Data){.connected=0,.timestamp=6000,.connected_count=1};
+        assert(pw_pad_ps5_read(&held)==PW_OK && !held.intercepted && !held.core.connected);
+        fixture_count=0;assert(pw_pad_ps5_read(&held)==PW_OK && !held.intercepted && !held.core.connected);
+        menu_open=0;fixture_count=1;fixture[0]=(PwPadPs5Data){.connected=1,.timestamp=6100,.connected_count=1};
+        assert(pw_pad_ps5_read(&held)==PW_OK);   /* the hold ends on this neutral read */
+        assert(pw_pad_ps5_read(&held)==PW_OK && held.core.connected && !held.intercepted);
+        /* Without the platform answer (NULL or unknown), samples decide as before. */
+        menu_ops.system_ui_overlaid=NULL;PwPadPs5 plain;
+        assert(pw_pad_ps5_open(&plain,&menu_ops,map,1)==PW_OK);
+        fixture[0].buttons=L1;assert(pw_pad_ps5_read(&plain)==PW_OK && plain.core.pressed_edges==L1);
+        assert(pw_pad_ps5_close(&held)==PW_OK && pw_pad_ps5_close(&plain)==PW_OK);
+    }
     return 0;
 }

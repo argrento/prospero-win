@@ -175,6 +175,18 @@ int pw_wine_game_pad_playstation(const PwPadPs5 *pad, PwWinePad *out, PwWinePadE
     return 1;
 }
 
+int pw_wine_pad_until_first(const PwPadPs5 *pad, int connected, int *arrived, PwWinePad *out,
+                            PwWinePadExtra *extra)
+{
+    if (!arrived || !out) return connected ? 1 : 0;
+    if (pad && pad->core.connected) *arrived = 1;
+    if (connected || *arrived) return connected ? 1 : 0;
+    memset(out, 0, sizeof(*out));
+    out->connected = 1;
+    if (extra) memset(extra, 0, sizeof(*extra));
+    return 1;
+}
+
 int pw_wine_script_pad(PwWinePad *pad, int connected, const PwScriptPad *script, int scripted)
 {
     if (!pad) return 0;

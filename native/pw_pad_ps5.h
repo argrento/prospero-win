@@ -40,6 +40,12 @@ typedef struct PwPadPs5Ops {
      * so the classic dual-motor path actually drives the actuators. NULL
      * if unavailable; its result is not fatal to opening the pad. */
     int (*pad_set_vibration_mode)(int32_t,int32_t);
+    /* Optional: 1 while a system menu (the PS button's, a system dialog)
+     * covers the title, 0 when not, <0 if unknown; NULL if unavailable.
+     * The console marks its own controllers' samples intercepted then, but
+     * not a controller it does not know is connected, such as a DualShock 4
+     * a payload bridges into the pad API. */
+    int (*system_ui_overlaid)(void);
 } PwPadPs5Ops;
 
 enum { PW_PAD_PS5_VIBRATION_COMPATIBLE=2 };
@@ -56,6 +62,9 @@ typedef struct PwPadPs5 {
      * (the PS button's menu, Create's capture menu). The controller is
      * still there; core.connected is 0 and its buttons are released. */
     unsigned intercepted;
+    /* 1 from a system menu over the title until the pad's buttons are all
+     * up after it: the press that closed the menu was the menu's. */
+    unsigned menu_hold;
     /* The newest connected sample's sticks (0..255, 0x80 centred) and
      * triggers; centred and released while disconnected or intercepted. */
     PwPadPs5Stick left_stick,right_stick;uint8_t l2,r2;

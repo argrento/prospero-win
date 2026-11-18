@@ -74,6 +74,17 @@ uint8_t pw_wine_rumble_level(uint32_t speed, uint32_t percent);
  * disconnected. Returns as pw_wine_game_pad does. */
 int pw_wine_game_pad_playstation(const PwPadPs5 *pad, PwWinePad *out, PwWinePadExtra *extra);
 
+/* Controller 0 before the title's controller first comes: connected and
+ * idle. SDL looks for XInput controllers once, when it starts, and a title
+ * has no device arrival to tell it of one that comes later (a controller
+ * that is bridged in after the title starts). arrived is the caller's, 0 at
+ * the start; it is set once pad is connected, and from then on connected
+ * (what pw_wine_game_pad returned) is passed through as it is, so a pad that
+ * goes is gone. Returns whether controller 0 is connected; out (and extra,
+ * when given) are neutral while it waits. */
+int pw_wine_pad_until_first(const PwPadPs5 *pad, int connected, int *arrived, PwWinePad *out,
+                            PwWinePadExtra *extra);
+
 /* A script build's scripted controller (src/pw_script_input.h) added to
  * the real one in pad, which pw_wine_game_pad filled (connected says
  * whether it is): the scripted buttons join the held ones, and each stick

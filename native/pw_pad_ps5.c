@@ -23,6 +23,7 @@ extern int scePadClose(int32_t);
 extern int scePadSetVibration(int32_t,const uint8_t *);
 extern int scePadSetVibrationMode(int32_t,int32_t);
 extern int sceUserServiceGetLoginUserIdList(int32_t *);
+extern int sceSystemServiceGetStatus(void *);
 static int platform_user_initialize(const void *p){return sceUserServiceInitialize(p);}
 static int platform_foreground_user(int32_t *u){return sceUserServiceGetForegroundUser(u);}
 static int platform_user_terminate(void){return sceUserServiceTerminate();}
@@ -36,6 +37,13 @@ static int platform_pad_set_vibration(int32_t h,const uint8_t m[2]){return scePa
 static int platform_login_users(int32_t ids[PW_PAD_PS5_USERS])
 {return sceUserServiceGetLoginUserIdList(ids);}
 static int platform_pad_set_vibration_mode(int32_t h,int32_t m){return scePadSetVibrationMode(h,m);}
+/* SceSystemServiceStatus: int32 event count, then isSystemUiOverlaid. */
+static int platform_system_ui_overlaid(void)
+{
+    uint8_t status[256];memset(status,0,sizeof(status));
+    if(sceSystemServiceGetStatus(status)!=0)return -1;
+    return status[4]!=0;
+}
 #endif
 
 int pw_pad_ps5_platform_ops(PwPadPs5Ops *ops)
@@ -47,7 +55,7 @@ int pw_pad_ps5_platform_ops(PwPadPs5Ops *ops)
     *ops=(PwPadPs5Ops){platform_user_initialize,platform_foreground_user,
         platform_user_terminate,platform_pad_init,platform_pad_open,
         platform_pad_read,platform_pad_close,platform_pad_set_vibration,
-        platform_login_users,platform_pad_set_vibration_mode};return PW_OK;
+        platform_login_users,platform_pad_set_vibration_mode,platform_system_ui_overlaid};return PW_OK;
 #endif
 }
 
@@ -142,11 +150,31 @@ static int read_batch(PwPadPs5 *pad,PwPadSample samples[PW_PAD_PS5_BATCH])
      * consumed repeatedly by the title lifecycle adapter. */
     pad->core.pressed_edges=0;pad->core.released_edges=0;
     int count=pad->ops.pad_read(pad->pad_handle,raw,PW_PAD_PS5_BATCH);pad->last_read_rc=count;
+    /* A system menu over the title has the pad, whatever its samples say,
+     * and keeps it until the buttons that closed the menu are up. */
+    const unsigned overlaid=pad->ops.system_ui_overlaid && pad->ops.system_ui_overlaid()>0;
+    if(overlaid)pad->menu_hold=1;
     if(count<0){pad->read_errors++;pad->intercepted=0;centre_analog(pad);return count;}
-    if(!count){pad->empty_reads++;return 0;}
+    if(!count) {
+        pad->empty_reads++;
+        /* An idle pad reports nothing new: the menu's start still shows,
+         * for a pad that is there (a gone one stays gone). */
+        if(!overlaid || pad->intercepted || !pad->core.connected)return 0;
+        samples[0]=(PwPadSample){.connected=1,.intercepted=1,.generation=pad->last_generation};
+        pad->intercepted=1;pad->intercepted_samples++;centre_analog(pad);return 1;
+    }
     if(count>PW_PAD_PS5_BATCH)count=PW_PAD_PS5_BATCH;
+    /* The whole batch is the menu's while it holds the pad; once the menu is
+     * gone the newest sample decides: buttons all up (or the pad gone) and
+     * the next read is the game's. An older neutral sample in the batch
+     * doesn't count, or the press that closed the menu would follow it. */
+    const unsigned hold=pad->menu_hold;
+    if(hold && !overlaid &&
+       (!raw[count-1].connected || !(raw[count-1].buttons&~PW_PAD_INTERCEPTED)))
+        pad->menu_hold=0;
     for(int i=0;i<count;i++) {
-        unsigned intercepted=(raw[i].buttons&PW_PAD_INTERCEPTED)!=0;
+        /* A disconnect is reported as one: the menu doesn't make a pad appear. */
+        unsigned intercepted=(raw[i].buttons&PW_PAD_INTERCEPTED)!=0 || (hold && raw[i].connected);
         samples[i]=(PwPadSample){.buttons=raw[i].buttons&~PW_PAD_INTERCEPTED,
             .timestamp_us=raw[i].timestamp,.generation=raw[i].connected_count,
             .connected=raw[i].connected!=0,.intercepted=intercepted};

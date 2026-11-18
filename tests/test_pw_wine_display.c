@@ -318,6 +318,48 @@ static void test_game_pad_playstation(void)
     assert(!extra.buttons && !extra.touching);
 }
 
+/* Controller 0 is there, idle, until the title's controller first comes;
+ * then it is the controller, and goes when it goes. */
+static void test_pad_until_first(void)
+{
+    PwPadPs5 pad;
+    PwWinePad xinput;
+    PwWinePadExtra extra;
+    int arrived = 0;
+
+    memset(&pad, 0, sizeof(pad));
+    memset(&xinput, 0x5a, sizeof(xinput));
+    memset(&extra, 0x5a, sizeof(extra));
+    assert(pw_wine_pad_until_first(&pad, 0, &arrived, &xinput, &extra) == 1 && !arrived);
+    assert(xinput.connected == 1 && !xinput.buttons && !xinput.thumb_lx && !xinput.left_trigger);
+    assert(!extra.buttons && !extra.touching);
+    memset(&xinput, 0x5a, sizeof(xinput));
+    assert(pw_wine_pad_until_first(&pad, 0, &arrived, &xinput, NULL) == 1 && xinput.connected == 1 && !xinput.buttons);
+    /* No read: the same until something is known. */
+    assert(pw_wine_pad_until_first(NULL, 0, &arrived, &xinput, &extra) == 1 && !arrived);
+    /* While the system has a pad that was never connected, its state. */
+    pad.intercepted = 1;
+    assert(pw_wine_game_pad(&pad, &xinput) == 1);
+    assert(pw_wine_pad_until_first(&pad, 1, &arrived, &xinput, NULL) == 1 && !arrived && xinput.connected == 1);
+    pad.intercepted = 0;
+
+    /* It comes: its own state, untouched. */
+    pad.core.connected = 1;
+    pad.core.previous_buttons = 0x4000u;   /* Cross */
+    assert(pw_wine_game_pad(&pad, &xinput) == 1);
+    assert(pw_wine_pad_until_first(&pad, 1, &arrived, &xinput, NULL) == 1 && arrived);
+    assert(xinput.buttons == 0x1000u);
+    /* It goes: gone, and it stays gone. */
+    pad.core.connected = 0;
+    assert(pw_wine_game_pad(&pad, &xinput) == 0);
+    assert(pw_wine_pad_until_first(&pad, 0, &arrived, &xinput, &extra) == 0 && !xinput.connected);
+    assert(pw_wine_pad_until_first(NULL, 0, &arrived, &xinput, &extra) == 0);
+
+    /* Without the caller's state: as given. */
+    assert(pw_wine_pad_until_first(&pad, 0, NULL, &xinput, NULL) == 0);
+    assert(pw_wine_pad_until_first(&pad, 1, &arrived, NULL, NULL) == 1);
+}
+
 /* A script build's controller added to the DualSense's. */
 static void test_rumble_level(void)
 {
@@ -413,6 +455,7 @@ int main(void)
     test_pad();
     test_rumble_level();
     test_game_pad_playstation();
+    test_pad_until_first();
     test_script_pad();
     printf("wine display passed: frame box copy, newest frame, refusals, concurrent put/take, "
            "profile bindings to keys and mouse buttons, stick pointer, resized frames, "
