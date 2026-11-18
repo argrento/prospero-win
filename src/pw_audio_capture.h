@@ -54,6 +54,15 @@ uint32_t pw_audio_capture_write(PwAudioCapture *capture,const int16_t *samples,u
                                 uint32_t rate);
 /* The client is done with frames frames from offset (at most held). */
 void pw_audio_capture_consume(PwAudioCapture *capture,uint32_t frames);
+/* Grains of silence a failed microphone read owes, so a capture stream
+ * keeps the device's clock while the read blocks: the read took ticks of a
+ * counter that runs freq per second, which is ticks * rate / freq frames;
+ * whole grains of grain frames are owed and the rest is carried in *carry
+ * (frames, start at 0) to the next call. 0 means less than a grain has
+ * passed: the caller waits a grain and makes one. More than max_grains is
+ * cut to max_grains and the carry forgotten (no client ring holds more). */
+uint32_t pw_audio_capture_owed_grains(uint64_t ticks,uint64_t freq,uint32_t rate,uint32_t grain,
+                                      uint32_t max_grains,uint64_t *carry);
 /* 1 once if frames were dropped since the last call (a packet's
  * AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY), else 0. */
 int pw_audio_capture_take_discontinuity(PwAudioCapture *capture);

@@ -125,3 +125,19 @@ int pw_audio_capture_take_discontinuity(PwAudioCapture *capture)
     capture->discontinuity=0;
     return 1;
 }
+
+uint32_t pw_audio_capture_owed_grains(uint64_t ticks,uint64_t freq,uint32_t rate,uint32_t grain,
+                                      uint32_t max_grains,uint64_t *carry)
+{
+    uint64_t frames,owed;
+    if(!carry || !freq || !grain)return 0;
+    /* split, so ticks * rate cannot overflow for any real wait */
+    frames=*carry+ticks/freq*rate+ticks%freq*rate/freq;
+    owed=frames/grain;
+    if(owed>max_grains) {
+        *carry=0;
+        return max_grains;
+    }
+    *carry=frames%grain;
+    return (uint32_t)owed;
+}

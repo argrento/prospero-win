@@ -192,6 +192,29 @@ static void test_wrap_and_reset(void)
     assert(pw_audio_capture_write(&c,in,1,48000)==1 && s16(ring,0,0,1)==0);
 }
 
+/* A read that blocked is paid back in silence for the time it took. */
+static void test_owed_grains(void)
+{
+    uint64_t carry=0;
+    /* a 3 s timeout at 16 kHz in 256-frame grains: 187.5 grains */
+    assert(pw_audio_capture_owed_grains(30000000,10000000,16000,256,1000,&carry)==187);
+    assert(carry==128);
+    /* the half grain carried makes the next one whole */
+    assert(pw_audio_capture_owed_grains(80000,10000000,16000,256,1000,&carry)==1);
+    assert(carry==0);
+    /* under a grain owes nothing yet, and is kept */
+    assert(pw_audio_capture_owed_grains(10000,10000000,16000,256,1000,&carry)==0);
+    assert(carry==16);
+    /* a long wait is cut, and the carry forgotten */
+    carry=100;
+    assert(pw_audio_capture_owed_grains(600000000,10000000,48000,256,375,&carry)==375);
+    assert(carry==0);
+    /* a nanosecond counter: an hour at 48 kHz */
+    assert(pw_audio_capture_owed_grains(3600000000000ull,1000000000,48000,256,~0u,&carry)==675000);
+    assert(pw_audio_capture_owed_grains(1,0,48000,256,10,&carry)==0);
+    assert(pw_audio_capture_owed_grains(1,1,48000,256,10,NULL)==0);
+}
+
 int main(void)
 {
     test_init_errors();
@@ -203,6 +226,7 @@ int main(void)
     test_silence();
     test_overrun();
     test_wrap_and_reset();
+    test_owed_grains();
     puts("audio capture passed");
     return 0;
 }

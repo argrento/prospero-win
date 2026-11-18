@@ -438,6 +438,9 @@ static void mixer_loop(void *args)
 /* Grains of silence while the microphone cannot be opened, before the
  * next try: about a second. */
 enum { CAPTURE_RETRY_GRAINS = 188 };
+/* At most this many grains of silence for one failed read: four seconds at
+ * 48 kHz, more than any client ring holds. */
+enum { CAPTURE_MAX_SILENT_GRAINS = 750 };
 
 static void capture_wait(uint32_t rate)
 {
@@ -455,7 +458,9 @@ static void capture_loop(void *args)
     struct ps5_stream *stream;
     uint32_t rate = PW_WINE_AUDIO_RATE, retry = 0;
     BOOL open = FALSE, listening, heard;
-    LARGE_INTEGER last = {{0}}, now, freq;
+    LARGE_INTEGER last = {{0}}, before, now, freq;
+    uint64_t carry = 0;
+    uint32_t silent;
 
     pthread_mutex_lock(&lock);
     for (;;)
@@ -496,15 +501,31 @@ static void capture_loop(void *args)
             TRACE("microphone open status %d rate %u\n", status, opened);
         }
         else if (retry) retry--;
+        NtQueryPerformanceCounter(&before, &freq);
         heard = open && !sink.input_read(grain);
-        /* no microphone data: silence, at the microphone's pace */
-        if (!heard) capture_wait(rate);
+        NtQueryPerformanceCounter(&now, NULL);
+        silent = 0;
+        if (!heard)
+        {
+            /* no microphone data: silence for as long as the read took (a
+             * read can block for seconds before it times out), so a game
+             * still sees the device's clock; at least one grain at the
+             * microphone's pace */
+            silent = pw_audio_capture_owed_grains(now.QuadPart - before.QuadPart, freq.QuadPart, rate,
+                                                  PW_WINE_AUDIO_INPUT_GRAIN, CAPTURE_MAX_SILENT_GRAINS, &carry);
+            if (!silent)
+            {
+                capture_wait(rate);
+                silent = 1;
+                carry = 0;
+            }
+        }
         else
         {
+            carry = 0;
             /* a read that came back in under half a grain did not block (no
              * device, or muted): wait half a grain, or the thread would spin
              * and run the clock fast */
-            NtQueryPerformanceCounter(&now, &freq);
             if (last.QuadPart && (now.QuadPart - last.QuadPart) * rate * 2 <
                 (LONGLONG)PW_WINE_AUDIO_INPUT_GRAIN * freq.QuadPart)
                 capture_wait(rate * 2);
@@ -514,15 +535,18 @@ static void capture_loop(void *args)
         pthread_mutex_lock(&lock);
         for (stream = captures; stream; stream = stream->next)
         {
-            UINT32 made;
+            UINT32 made, i;
 
             if (!stream->playing) continue;
-            made = pw_audio_capture_write(&stream->capture, heard ? grain : NULL, PW_WINE_AUDIO_INPUT_GRAIN, rate);
-            stream->since_event += made;
-            if (stream->since_event >= stream->period_frames)
+            for (i = 0; i < (heard ? 1 : silent); i++)
             {
-                stream->since_event %= stream->period_frames;
-                if (stream->event) NtSetEvent(stream->event, NULL);
+                made = pw_audio_capture_write(&stream->capture, heard ? grain : NULL, PW_WINE_AUDIO_INPUT_GRAIN, rate);
+                stream->since_event += made;
+                if (stream->since_event >= stream->period_frames)
+                {
+                    stream->since_event %= stream->period_frames;
+                    if (stream->event) NtSetEvent(stream->event, NULL);
+                }
             }
         }
     }
