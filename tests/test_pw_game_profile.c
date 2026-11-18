@@ -317,8 +317,54 @@ static void test_runtime(void)
     assert(parse(APP "[runtime]\nthread_scheduling = 1\nshared_input = 1\nfast_clock = true\ncpu = native\n",
                  &p) == PW_OK);
     assert(p.runtime.fast_clock && p.runtime.cpu == PW_GAME_CPU_NATIVE);
-    assert(pw_game_runtime_env(&p.runtime, env) == PW_GAME_RUNTIME_ENV_MAX);
+    assert(pw_game_runtime_env(&p.runtime, env) == 2);
     assert(!strcmp(env[0].name, "WINE_PS5_SCHED") && !strcmp(env[1].name, "PW_INPUT_SHARED_FAST"));
+}
+
+/* [runtime] system_locale and user_locale: Windows locale names, set as the
+ * Unix locale Wine reads for each (LC_CTYPE, LC_MESSAGES); unset by default. */
+static void test_runtime_locales(void)
+{
+    PwGameEnv env[PW_GAME_RUNTIME_ENV_MAX];
+    PwGameProfile p;
+
+    assert(parse(APP, &p) == PW_OK);
+    assert(!p.runtime.system_locale && !p.runtime.user_locale && pw_game_runtime_env(&p.runtime, env) == 0);
+    /* The system locale alone: Japanese code page, Wine's own user locale. */
+    assert(parse(APP "[runtime]\nsystem_locale = ja-JP\n", &p) == PW_OK);
+    assert(!strcmp(p.runtime.system_locale, "ja_JP.UTF-8") && !p.runtime.user_locale);
+    assert(pw_game_runtime_env(&p.runtime, env) == 1);
+    assert(!strcmp(env[0].name, "LC_CTYPE") && !strcmp(env[0].value, "ja_JP.UTF-8"));
+    /* Both, in any case, after the other switches. */
+    assert(parse(APP "[runtime]\nversion = 2\nUser_Locale = en-gb\nSYSTEM_LOCALE = ZH-TW\n", &p) == PW_OK);
+    assert(!strcmp(p.runtime.system_locale, "zh_TW.UTF-8") && !strcmp(p.runtime.user_locale, "en_GB.UTF-8"));
+    assert(parse(APP "[runtime]\nthread_scheduling = 1\nshared_input = 1\nsystem_locale = ko-KR\n"
+                 "user_locale = de-DE\n", &p) == PW_OK);
+    assert(pw_game_runtime_env(&p.runtime, env) == PW_GAME_RUNTIME_ENV_MAX);
+    assert(!strcmp(env[2].name, "LC_CTYPE") && !strcmp(env[2].value, "ko_KR.UTF-8"));
+    assert(!strcmp(env[3].name, "LC_MESSAGES") && !strcmp(env[3].value, "de_DE.UTF-8"));
+    /* Every listed name maps to its Unix locale. */
+    {
+        static const char *const names[] = { "en-US", "en-GB", "de-DE", "fr-FR", "es-ES", "it-IT", "pt-BR",
+                                             "pl-PL", "ru-RU", "ja-JP", "ko-KR", "zh-CN", "zh-TW" };
+        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+            char text[1024], unix_name[16];
+            snprintf(text, sizeof(text), APP "[runtime]\nsystem_locale = %s\n", names[i]);
+            assert(parse(text, &p) == PW_OK);
+            snprintf(unix_name, sizeof(unix_name), "%c%c_%c%c.UTF-8", names[i][0], names[i][1], names[i][3],
+                     names[i][4]);
+            assert(!strcmp(p.runtime.system_locale, unix_name));
+        }
+    }
+    /* Names Wine might take but the profile does not list, Unix spellings,
+     * empty values and repeats are refused. */
+    assert(parse(APP "[runtime]\nsystem_locale = ja_JP.UTF-8\n", &p) == PW_ERR_UNSUPPORTED);
+    assert(parse(APP "[runtime]\nsystem_locale = ja\n", &p) == PW_ERR_UNSUPPORTED);
+    assert(parse(APP "[runtime]\nuser_locale = nl-NL\n", &p) == PW_ERR_UNSUPPORTED);
+    assert(parse(APP "[runtime]\nuser_locale = ja-JP;x\n", &p) == PW_ERR_UNSUPPORTED);
+    assert(parse(APP "[runtime]\nsystem_locale =\n", &p) != PW_OK);
+    assert(parse(APP "[runtime]\nsystem_locale = ja-JP\nsystem_locale = ja-JP\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[runtime]\nlocale = ja-JP\n", &p) == PW_ERR_UNSUPPORTED);
 }
 
 /* [runtime] version: a profile without it is version 1 and keeps wave64
@@ -892,6 +938,7 @@ int main(void)
     test_profile();
     test_display_env();
     test_runtime();
+    test_runtime_locales();
     test_version();
     test_cpu();
     test_debug_env();

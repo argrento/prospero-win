@@ -122,6 +122,15 @@
  *                               ; frequency at launch and sets
  *                               ; PW_QPC_TSC_VALIDATED/PW_QPC_TSC_HZ only
  *                               ; when it is consistent; default false
+ *   system_locale = ja-JP       ; Windows' system locale, which sets the code
+ *                               ; page of programs that are not Unicode
+ *                               ; (LC_CTYPE=ja_JP.UTF-8; Wine patch 1028)
+ *   user_locale = en-US         ; Windows' user locale: the language and
+ *                               ; formats the game is told about
+ *                               ; (LC_MESSAGES=en_US.UTF-8). Both take one
+ *                               ; of en-US en-GB de-DE fr-FR es-ES it-IT
+ *                               ; pt-BR pl-PL ru-RU ja-JP ko-KR zh-CN
+ *                               ; zh-TW; default: Wine's, en-US
  *
  * Buttons: cross circle square triangle l1 r1 l2 r2 l3 r3 up down left
  * right options create touchpad. An input preset file holds only an [input]
@@ -201,6 +210,8 @@ typedef struct PwGameRuntime {
                                    PW_QPC_TSC_VALIDATED and PW_QPC_TSC_HZ */
     int version;                /* [runtime] version: 1 (also when unset) or 2;
                                    whose defaults the title applies */
+    const char *system_locale;  /* LC_CTYPE value, static; NULL when unset */
+    const char *user_locale;    /* LC_MESSAGES value, static; NULL when unset */
 } PwGameRuntime;
 
 /* A variable of Wine's environment; both strings are static. */
@@ -216,7 +227,7 @@ typedef struct PwGameEnvironmentEntry {
     char name[PW_GAME_ENVIRONMENT_NAME];
     char value[PW_GAME_ENVIRONMENT_VALUE];
 } PwGameEnvironmentEntry;
-enum { PW_GAME_RUNTIME_ENV_MAX = 2, PW_GAME_CPU_ENV_MAX = 2, PW_GAME_GRAPHICS_ENV_MAX = 4,
+enum { PW_GAME_RUNTIME_ENV_MAX = 4, PW_GAME_CPU_ENV_MAX = 2, PW_GAME_GRAPHICS_ENV_MAX = 4,
        PW_GAME_CLOCK_ENV_MAX = 2, PW_GAME_DISPLAY_ENV_MAX = 2, PW_GAME_VERSION_ENV_MAX = 1 };
 
 typedef struct PwGameProfile {

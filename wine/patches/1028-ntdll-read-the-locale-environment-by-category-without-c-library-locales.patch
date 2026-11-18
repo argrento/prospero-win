@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Wed, 18 Nov 2026 01:00:00 +0100
+Subject: [PATCH] ntdll: Read the locale environment by category when the C library has
+ no locales.
+
+A C library without locales, or a host where the requested locale is not
+installed, answers "C" to setlocale() whatever the environment asks for.
+unix_to_win_locale() then falls back to LC_ALL only, so LC_CTYPE, which
+picks the system locale and with it the ANSI and OEM code pages, and
+LC_MESSAGES, which picks the user locale, cannot be set apart.
+
+Read LC_ALL, then the category's own variable, then LANG, the order
+setlocale() follows.
+---
+ dlls/ntdll/unix/env.c | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ntdll/unix/env.c b/dlls/ntdll/unix/env.c
+index 1d289007c7..8c2c846bd6 100644
+--- a/dlls/ntdll/unix/env.c
++++ b/dlls/ntdll/unix/env.c
+@@ -634,16 +634,20 @@ static WCHAR **build_wargv( const WCHAR *image )
+ 
+ /* Unix format is: lang[_country][.charset][@modifier]
+  * Windows format is: lang[-script][-country][_modifier] */
+-static BOOL unix_to_win_locale( const char *unix_name, char *win_name )
++static BOOL unix_to_win_locale( const char *unix_name, const char *category, char *win_name )
+ {
+     static const char sep[] = "_.@";
+     const char *extra = NULL;
+     char buffer[LOCALE_NAME_MAX_LENGTH];
+     char *p, *country = NULL, *modifier = NULL;
+ 
++    /* A C library without locales answers "C" whatever the environment asks
++     * for; read the environment in the order setlocale() would. */
+     if (!unix_name || !unix_name[0] || !strcmp( unix_name, "C" ))
+     {
+         unix_name = getenv( "LC_ALL" );
++        if (!unix_name || !unix_name[0]) unix_name = getenv( category );
++        if (!unix_name || !unix_name[0]) unix_name = getenv( "LANG" );
+         if (!unix_name || !unix_name[0]) return FALSE;
+     }
+ 
+@@ -732,8 +736,8 @@ static void init_locale(void)
+     char *p;
+ 
+     setlocale( LC_ALL, "" );
+-    if (!unix_to_win_locale( setlocale( LC_CTYPE, NULL ), system_locale )) system_locale[0] = 0;
+-    if (!unix_to_win_locale( setlocale( LC_MESSAGES, NULL ), user_locale )) user_locale[0] = 0;
++    if (!unix_to_win_locale( setlocale( LC_CTYPE, NULL ), "LC_CTYPE", system_locale )) system_locale[0] = 0;
++    if (!unix_to_win_locale( setlocale( LC_MESSAGES, NULL ), "LC_MESSAGES", user_locale )) user_locale[0] = 0;
+ 
+ #ifdef __APPLE__
+     if (!system_locale[0])

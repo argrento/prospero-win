@@ -516,11 +516,37 @@ static int debug_field(PwGameProfile *profile, const uint8_t *key, size_t key_le
  * 1/0; cpu: native or translator; version: 1 or 2; each once. A version
  * this title does not know is refused, so a profile written for newer
  * defaults never runs with older ones. */
+/* [runtime] system_locale and user_locale: Windows locale names and the
+ * Unix locale Wine reads for them. The console's C library has no locales,
+ * so Wine takes the name from the environment (patch 1028). Names are in
+ * lower case, as is() compares them. */
+static const struct { const char *windows, *unix_name; } runtime_locales[] = {
+    { "en-us", "en_US.UTF-8" }, { "en-gb", "en_GB.UTF-8" }, { "de-de", "de_DE.UTF-8" },
+    { "fr-fr", "fr_FR.UTF-8" }, { "es-es", "es_ES.UTF-8" }, { "it-it", "it_IT.UTF-8" },
+    { "pt-br", "pt_BR.UTF-8" }, { "pl-pl", "pl_PL.UTF-8" }, { "ru-ru", "ru_RU.UTF-8" },
+    { "ja-jp", "ja_JP.UTF-8" }, { "ko-kr", "ko_KR.UTF-8" }, { "zh-cn", "zh_CN.UTF-8" },
+    { "zh-tw", "zh_TW.UTF-8" },
+};
+
 static int runtime_field(PwGameRuntime *runtime, uint32_t *seen, const uint8_t *key, size_t key_length,
                          const uint8_t *v, size_t n)
 {
     uint32_t bit;
     int *field, on;
+    const char **locale = NULL;
+
+    if (is(key, key_length, "system_locale")) bit = 32u, locale = &runtime->system_locale;
+    else if (is(key, key_length, "user_locale")) bit = 64u, locale = &runtime->user_locale;
+    if (locale) {
+        if (*seen & bit) return PW_ERR_MALFORMED;
+        for (size_t i = 0; i < sizeof(runtime_locales) / sizeof(runtime_locales[0]); i++)
+            if (is(v, n, runtime_locales[i].windows)) {
+                *locale = runtime_locales[i].unix_name;
+                *seen |= bit;
+                return PW_OK;
+            }
+        return PW_ERR_UNSUPPORTED;
+    }
 
     if (is(key, key_length, "cpu")) {
         if (*seen & 2u) return PW_ERR_MALFORMED;
@@ -625,6 +651,8 @@ size_t pw_game_runtime_env(const PwGameRuntime *runtime, PwGameEnv *env)
     if (!runtime || !env) return 0;
     if (runtime->thread_scheduling) env[count++] = (PwGameEnv){ "WINE_PS5_SCHED", "1" };
     if (runtime->shared_input) env[count++] = (PwGameEnv){ "PW_INPUT_SHARED_FAST", "1" };
+    if (runtime->system_locale) env[count++] = (PwGameEnv){ "LC_CTYPE", runtime->system_locale };
+    if (runtime->user_locale) env[count++] = (PwGameEnv){ "LC_MESSAGES", runtime->user_locale };
     return count;
 }
 

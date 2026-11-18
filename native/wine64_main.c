@@ -2297,8 +2297,10 @@ int main(int argc, char **argv)
 
             for (size_t i = 0; i < runtime_count; i++)
                 extra[config.extra_env_count++] = (PwWineStartEnv){ runtime_env[i].name, runtime_env[i].value };
-            PS5LOG_LOG("PW_WINE64 runtime thread_scheduling=%d shared_input=%d", game->runtime.thread_scheduling,
-                       game->runtime.shared_input);
+            PS5LOG_LOG("PW_WINE64 runtime thread_scheduling=%d shared_input=%d system_locale=%s user_locale=%s",
+                       game->runtime.thread_scheduling, game->runtime.shared_input,
+                       game->runtime.system_locale ? game->runtime.system_locale : "-",
+                       game->runtime.user_locale ? game->runtime.user_locale : "-");
         }
         /* [runtime] version: a version 1 profile keeps the defaults it was
          * written for (src/pw_game_profile.h). */
