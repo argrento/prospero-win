@@ -2819,6 +2819,26 @@ int main(int argc, char **argv)
             microphone_ops.log = microphone_log;
             if (microphone_status == PW_OK)
                 microphone_status = pw_audio_in_ps5_init(&audio_in, &microphone_ops, user, reopen);
+            /* The system's audio-in client sets up its link to the audio
+             * service on the first open. Made later, from Wine's capture
+             * thread, every read of that handle timed out after 3 s
+             * (0x8002003c); opened once here first, under the console's
+             * umask 0 as the output port, every later open reads sound. So
+             * the microphone is opened and closed once now, before the game
+             * starts, and nothing is read: no other thread runs yet, so the
+             * umask widens no other file. */
+            if (microphone_status == PW_OK) {
+                const int mask = per_game_mode ? pw_title_ps5_umask(0) : -1;
+                int handle = -1, closed = 0;
+
+                for (size_t i = 0; i < PW_AUDIO_IN_PS5_ATTEMPTS && handle < 0; i++)
+                    handle = microphone_ops.open(user, pw_audio_in_ps5_attempts[i].type, 0, PW_AUDIO_IN_PS5_GRAIN,
+                                                 pw_audio_in_ps5_attempts[i].rate, PW_AUDIO_IN_PS5_FORMAT_S16_MONO);
+                if (handle >= 0) closed = microphone_ops.close(handle);
+                if (mask >= 0) (void)pw_title_ps5_umask((unsigned)mask);
+                PS5LOG_LOG("PW_WINE64 microphone prime open=%#x close=%#x umask0=%d", (unsigned)handle,
+                           (unsigned)closed, mask >= 0);
+            }
             if (microphone_status == PW_OK) {
                 const char *probe = debug_env_value(game, "PW_AUDIO_MIC_PROBE");
                 if (probe && !strcmp(probe, "1")) {
