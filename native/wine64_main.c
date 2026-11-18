@@ -963,6 +963,49 @@ static void microphone_close(void *context)
 
 _Static_assert(PW_WINE_AUDIO_INPUT_GRAIN == PW_AUDIO_IN_PS5_GRAIN, "Wine's microphone grain is the console's");
 
+/* [debug] env PW_AUDIO_MIC_PROBE=1: before the game starts, open the
+ * microphone as general 48 kHz and as voice chat 16 kHz, read two grains
+ * from each and close it, once under the console's umask 0 (as the output
+ * port opens) and once under the private umask, logging every answer: the
+ * silent state, each read's result, time and loudest sample. Reads that
+ * time out under one umask and not the other say which the microphone
+ * needs. Nothing else runs yet, so umask 0 here widens no other file. */
+static void microphone_probe(const PwAudioInPs5Ops *ops, int user, int lower_mask)
+{
+    static int16_t frames[PW_AUDIO_IN_PS5_GRAIN];
+    static const struct { int type; uint32_t rate; } tries[] = {
+        { PW_AUDIO_IN_PS5_TYPE_GENERAL, 48000 }, { PW_AUDIO_IN_PS5_TYPE_VOICE_CHAT, 16000 },
+    };
+    const char *label = lower_mask ? "umask0" : "private";
+
+    for (size_t t = 0; t < sizeof(tries) / sizeof(tries[0]); t++) {
+        const int mask = lower_mask ? pw_title_ps5_umask(0) : -1;
+        const int handle = ops->open(user, tries[t].type, 0, PW_AUDIO_IN_PS5_GRAIN, tries[t].rate,
+                                     PW_AUDIO_IN_PS5_FORMAT_S16_MONO);
+        const int state = handle >= 0 ? ops->silent_state(handle) : 0;
+
+        PS5LOG_LOG("PW_WINE64 microphone probe %s user=%d type=%d rate=%u open=%#x silent=%#x", label, user,
+                   tries[t].type, (unsigned)tries[t].rate, (unsigned)handle, (unsigned)state);
+        for (int i = 0; handle >= 0 && i < 2; i++) {
+            const uint64_t start = now_ns();
+            int peak = 0, result;
+
+            memset(frames, 0, sizeof(frames));
+            result = ops->input(handle, frames);
+            for (size_t f = 0; f < PW_AUDIO_IN_PS5_GRAIN; f++) {
+                const int value = frames[f] < 0 ? -frames[f] : frames[f];
+                if (value > peak) peak = value;
+            }
+            PS5LOG_LOG("PW_WINE64 microphone probe %s read=%d result=%#x ms=%u peak=%d silent=%#x", label, i,
+                       (unsigned)result, (unsigned)((now_ns() - start) / 1000000u), peak,
+                       (unsigned)ops->silent_state(handle));
+        }
+        if (handle >= 0)
+            PS5LOG_LOG("PW_WINE64 microphone probe %s close=%#x", label, (unsigned)ops->close(handle));
+        if (mask >= 0) (void)pw_title_ps5_umask((unsigned)mask);
+    }
+}
+
 /* A [debug] env value of the profile, or NULL. */
 static const char *debug_env_value(const PwGameProfile *game, const char *name)
 {
@@ -2776,7 +2819,14 @@ int main(int argc, char **argv)
             microphone_ops.log = microphone_log;
             if (microphone_status == PW_OK)
                 microphone_status = pw_audio_in_ps5_init(&audio_in, &microphone_ops, user, reopen);
-            if (microphone_status == PW_OK) set_input(&microphone, NULL);
+            if (microphone_status == PW_OK) {
+                const char *probe = debug_env_value(game, "PW_AUDIO_MIC_PROBE");
+                if (probe && !strcmp(probe, "1")) {
+                    microphone_probe(&microphone_ops, user, per_game_mode);
+                    microphone_probe(&microphone_ops, user, 0);
+                }
+                set_input(&microphone, NULL);
+            }
             PS5LOG_LOG("PW_WINE64 microphone=%s user=%d reopen=%s sink=%s calls=%s",
                        off ? "off" : pw_result_name(microphone_status), user,
                        reopen == PW_AUDIO_IN_PS5_REOPEN_PLUG ? "plug" :
