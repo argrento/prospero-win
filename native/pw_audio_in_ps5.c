@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "pw_audio_in_ps5.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -9,38 +10,86 @@ const PwAudioInPs5Attempt pw_audio_in_ps5_attempts[PW_AUDIO_IN_PS5_ATTEMPTS] = {
     { PW_AUDIO_IN_PS5_TYPE_GENERAL, 16000 },
 };
 
+const char *const pw_audio_in_ps5_paths[PW_AUDIO_IN_PS5_PATHS] = {
+    "libSceAudioIn.sprx", "/system/common/lib/libSceAudioIn.sprx",
+};
+
+int pw_audio_in_ps5_resolve(PwAudioInPs5Ops *ops, const PwAudioInPs5Loader *loader, char *how, size_t how_size)
+{
+    static const char *const names[] = { "sceAudioInOpen", "sceAudioInInput", "sceAudioInGetSilentState",
+                                         "sceAudioInClose" };
+    size_t used = 0;
+    char scratch[8];
+
+    if (!how || !how_size) how = scratch, how_size = sizeof(scratch);
+    how[0] = 0;
+    if (!ops || !loader || !loader->load || !loader->resolve) return PW_ERR_PRECONDITION;
+    memset(ops, 0, sizeof(*ops));
+    for (size_t i = 0; i < PW_AUDIO_IN_PS5_PATHS; i++) {
+        int result = 0;
+        int32_t handle = loader->load(pw_audio_in_ps5_paths[i], &result);
+        void *found[4] = { 0 };
+        size_t missing = 4;
+
+        if (handle >= 0)
+            for (missing = 0; missing < 4; missing++)
+                if (loader->resolve(handle, names[missing], &found[missing]) != 0 || !found[missing]) break;
+        if (handle >= 0 && missing == 4) {
+            ops->open = (int (*)(int, int, int, uint32_t, uint32_t, uint32_t))(uintptr_t)found[0];
+            ops->input = (int (*)(int, void *))(uintptr_t)found[1];
+            ops->silent_state = (int (*)(int))(uintptr_t)found[2];
+            ops->close = (int (*)(int))(uintptr_t)found[3];
+            snprintf(how, how_size, "dlsym path=%s handle=%d", pw_audio_in_ps5_paths[i], (int)handle);
+            return PW_OK;
+        }
+        if (used < how_size) {
+            int n = handle < 0 ? snprintf(how + used, how_size - used, "%s%#x", i ? "," : "none load=", (unsigned)handle)
+                               : snprintf(how + used, how_size - used, "%s%d:%s", i ? "," : "none load=", (int)handle,
+                                          names[missing]);
+            used += n > 0 ? (size_t)n : 0;
+        }
+    }
+    return PW_ERR_NOT_FOUND;
+}
+
 #ifndef PW_AUDIO_IN_PS5_HOST_TEST
 /* Link-only imports (native/stubs/libSceAudioIn.c); the system's module
- * provides them. The firmware leaves an import it cannot resolve at 0, and
+ * provides them. The firmware leaves an import it does not bind at 0, and
  * a call to it jumps to 0 (docs/WINE_PS5_BUILD.md, "Imports a title does
- * not get"). Weak declarations make the compiler read the resolved address
- * instead of assuming one, so a title without libSceAudioIn gets no
- * microphone rather than a jump to 0. */
+ * not get"). Weak declarations make the compiler read the bound address
+ * instead of assuming one, so an unbound import is seen and looked up. */
 extern int sceAudioInOpen(int, int, int, uint32_t, uint32_t, uint32_t) __attribute__((weak));
 extern int sceAudioInInput(int, void *) __attribute__((weak));
 extern int sceAudioInGetSilentState(int) __attribute__((weak));
 extern int sceAudioInClose(int) __attribute__((weak));
-static int platform_open(int u, int t, int i, uint32_t g, uint32_t r, uint32_t f)
-{ return sceAudioInOpen(u, t, i, g, r, f); }
-static int platform_input(int h, void *p) { return sceAudioInInput(h, p); }
-static int platform_silent(int h) { return sceAudioInGetSilentState(h); }
-static int platform_close(int h) { return sceAudioInClose(h); }
+int32_t sceKernelLoadStartModule(const char *path, size_t argc, const void *argv, uint32_t flags,
+                                 const void *option, int *result);
+int sceKernelDlsym(int32_t handle, const char *symbol, void **address);
+
+static int32_t kernel_load(const char *path, int *result)
+{
+    return sceKernelLoadStartModule(path, 0, NULL, 0, NULL, result);
+}
 #endif
 
-int pw_audio_in_ps5_platform_ops(PwAudioInPs5Ops *ops)
+int pw_audio_in_ps5_platform_ops(PwAudioInPs5Ops *ops, char *how, size_t how_size)
 {
+    if (how && how_size) how[0] = 0;
     if (!ops) return PW_ERR_PRECONDITION;
     memset(ops, 0, sizeof(*ops));
 #ifdef PW_AUDIO_IN_PS5_HOST_TEST
     return PW_ERR_UNSUPPORTED;
 #else
-    if (!sceAudioInOpen || !sceAudioInInput || !sceAudioInGetSilentState || !sceAudioInClose)
-        return PW_ERR_NOT_FOUND;
-    ops->open = platform_open;
-    ops->input = platform_input;
-    ops->silent_state = platform_silent;
-    ops->close = platform_close;
-    return PW_OK;
+    if (sceAudioInOpen && sceAudioInInput && sceAudioInGetSilentState && sceAudioInClose) {
+        ops->open = sceAudioInOpen;
+        ops->input = sceAudioInInput;
+        ops->silent_state = sceAudioInGetSilentState;
+        ops->close = sceAudioInClose;
+        if (how && how_size) snprintf(how, how_size, "direct");
+        return PW_OK;
+    }
+    static const PwAudioInPs5Loader kernel = { kernel_load, sceKernelDlsym };
+    return pw_audio_in_ps5_resolve(ops, &kernel, how, how_size);
 #endif
 }
 

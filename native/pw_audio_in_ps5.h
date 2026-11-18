@@ -27,6 +27,7 @@
  * not change; while it fails, reads fail and the reader plays silence.
  */
 #include "../include/prospero_win.h"
+#include <stddef.h>
 #include <stdint.h>
 
 enum {
@@ -66,9 +67,28 @@ typedef struct PwAudioInPs5 {
     uint32_t reads, failures, reopens;
 } PwAudioInPs5;
 
-/* The console's calls; PW_ERR_NOT_FOUND when the firmware resolved none of
- * libSceAudioIn for this title, PW_ERR_UNSUPPORTED on the host. */
-int pw_audio_in_ps5_platform_ops(PwAudioInPs5Ops *ops);
+/* How a title reaches libSceAudioIn when its imports were left unbound:
+ * load a module by name and look a symbol up in it. */
+typedef struct PwAudioInPs5Loader {
+    int32_t (*load)(const char *path, int *result);   /* a module handle, or a negative error */
+    int (*resolve)(int32_t handle, const char *symbol, void **address);   /* 0 when found */
+} PwAudioInPs5Loader;
+/* The paths load is tried with, in order. */
+enum { PW_AUDIO_IN_PS5_PATHS = 2 };
+extern const char *const pw_audio_in_ps5_paths[PW_AUDIO_IN_PS5_PATHS];
+
+/* The four calls from the first path that loads and has them all: PW_OK, or
+ * PW_ERR_NOT_FOUND. how (may be NULL) says what each path answered, for the
+ * title's log: "dlsym path=<p> handle=<h>", or "none load=<status>,..." with
+ * the first missing symbol of a path that loaded. */
+int pw_audio_in_ps5_resolve(PwAudioInPs5Ops *ops, const PwAudioInPs5Loader *loader, char *how, size_t how_size);
+/* The console's calls: the title's imports when the firmware bound them
+ * ("direct"), else pw_audio_in_ps5_resolve through the kernel. A console
+ * firmware was measured leaving weak imports at 0 although the title lists
+ * libSceAudioIn as needed, so the lookup is the usual way. PW_ERR_NOT_FOUND
+ * when neither reached the calls, PW_ERR_UNSUPPORTED on the host. how as
+ * for pw_audio_in_ps5_resolve. */
+int pw_audio_in_ps5_platform_ops(PwAudioInPs5Ops *ops, char *how, size_t how_size);
 /* The policy an environment value names: "plug", "none", else silent. */
 int pw_audio_in_ps5_reopen_policy(const char *value);
 /* A closed microphone of user_id. */

@@ -28,11 +28,17 @@ The log lines below are in the title's session log.
 Start any game with the new title shell, before anything else. Each title
 imports libSceAudioIn now.
 
-- The game starts, and the log has `PW_WINE64 microphone=ok user=<id>`.
-- `microphone=not-found` means the firmware did not resolve libSceAudioIn
-  for the title. The title then lists no microphone and carries on. Note it:
-  the module must then be loaded before the first call, and no module id for
-  it is known yet.
+- The game starts, and the log has `PW_WINE64 microphone=ok user=<id>
+  reopen=silent sink=ok calls=<how>`.
+- `calls=direct`: the firmware bound the title's imports. `calls=dlsym
+  path=<p> handle=<h>`: they were left at 0, and the title looked the calls
+  up in the module it loaded by that path. One console firmware left them at
+  0 although the title lists libSceAudioIn as needed, so expect `dlsym`.
+- `microphone=not-found` with `sink=missing`: the runtime's ntdll has no
+  input hook (a title on an older runtime). With `calls=none load=...`: no
+  path loaded, or a loaded module lacked a call; the field gives each path's
+  status or `handle:missing call`. The title then lists no microphone and
+  carries on.
 
 ## 1. Where the main port plays
 

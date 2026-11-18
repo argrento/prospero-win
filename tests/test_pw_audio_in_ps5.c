@@ -75,8 +75,9 @@ static void test_init(void)
     assert(pw_audio_in_ps5_reopen_policy("plug") == PW_AUDIO_IN_PS5_REOPEN_PLUG);
     assert(pw_audio_in_ps5_reopen_policy("none") == PW_AUDIO_IN_PS5_REOPEN_NONE);
     PwAudioInPs5Ops platform;
-    assert(pw_audio_in_ps5_platform_ops(NULL) == PW_ERR_PRECONDITION);
-    assert(pw_audio_in_ps5_platform_ops(&platform) == PW_ERR_UNSUPPORTED && !platform.open);
+    char how[64] = "stale";
+    assert(pw_audio_in_ps5_platform_ops(NULL, how, sizeof(how)) == PW_ERR_PRECONDITION && !how[0]);
+    assert(pw_audio_in_ps5_platform_ops(&platform, NULL, 0) == PW_ERR_UNSUPPORTED && !platform.open);
 }
 
 /* 48 kHz when the system takes it, else 16 kHz voice chat; every answer logged. */
@@ -216,6 +217,65 @@ static void test_reopen_plug(void)
     assert(open_handles == 0);
 }
 
+/* The module the lookup loads: which paths load, and which symbols it has. */
+static int load_from = 0, load_calls = 0;
+static const char *lacking;
+static int fake_open(int u, int t, int i, uint32_t g, uint32_t r, uint32_t f)
+{ (void)u, (void)t, (void)i, (void)g, (void)r, (void)f; return 0x55; }
+static int fake_input(int h, void *p) { (void)h, (void)p; return 256; }
+static int fake_silent(int h) { (void)h; return 0; }
+static int fake_close(int h) { (void)h; return 0; }
+static int32_t fake_load(const char *path, int *result)
+{
+    *result = 0;
+    return load_calls++ >= load_from ? (int32_t)(40 + strlen(path) % 7) : (int32_t)0x80020063;
+}
+static int fake_resolve(int32_t handle, const char *symbol, void **address)
+{
+    (void)handle;
+    *address = NULL;
+    if (lacking && !strcmp(symbol, lacking)) return -1;
+    if (!strcmp(symbol, "sceAudioInOpen")) *address = (void *)(uintptr_t)fake_open;
+    else if (!strcmp(symbol, "sceAudioInInput")) *address = (void *)(uintptr_t)fake_input;
+    else if (!strcmp(symbol, "sceAudioInGetSilentState")) *address = (void *)(uintptr_t)fake_silent;
+    else if (!strcmp(symbol, "sceAudioInClose")) *address = (void *)(uintptr_t)fake_close;
+    return *address ? 0 : -1;
+}
+
+/* Unbound imports: the calls come from the module by name, else by path;
+ * a path that does not load or lacks a call is passed over and reported. */
+static void test_resolve(void)
+{
+    const PwAudioInPs5Loader loader = { fake_load, fake_resolve }, none = { fake_load, NULL };
+    PwAudioInPs5Ops found;
+    char how[128];
+
+    load_from = 0, load_calls = 0, lacking = NULL;
+    assert(pw_audio_in_ps5_resolve(&found, &loader, how, sizeof(how)) == PW_OK && load_calls == 1);
+    assert(!strncmp(how, "dlsym path=libSceAudioIn.sprx handle=", 37));
+    assert(found.open(1, 1, 0, 256, 48000, 0) == 0x55 && found.input(1, NULL) == 256 && !found.silent_state(1) &&
+           !found.close(1) && !found.log);
+
+    load_from = 1, load_calls = 0;
+    assert(pw_audio_in_ps5_resolve(&found, &loader, how, sizeof(how)) == PW_OK && load_calls == 2);
+    assert(!strncmp(how, "dlsym path=/system/common/lib/libSceAudioIn.sprx", 48) && found.open);
+
+    load_from = 2, load_calls = 0;
+    assert(pw_audio_in_ps5_resolve(&found, &loader, how, sizeof(how)) == PW_ERR_NOT_FOUND && !found.open);
+    assert(!strcmp(how, "none load=0x80020063,0x80020063"));
+
+    load_from = 0, load_calls = 0, lacking = "sceAudioInGetSilentState";
+    assert(pw_audio_in_ps5_resolve(&found, &loader, how, sizeof(how)) == PW_ERR_NOT_FOUND && !found.open &&
+           !found.input);
+    assert(strstr(how, "none load=") && strstr(how, ":sceAudioInGetSilentState,") && load_calls == 2);
+    lacking = NULL;
+
+    assert(pw_audio_in_ps5_resolve(&found, &loader, NULL, 0) == PW_OK);
+    assert(pw_audio_in_ps5_resolve(&found, &none, how, sizeof(how)) == PW_ERR_PRECONDITION && !how[0]);
+    assert(pw_audio_in_ps5_resolve(NULL, &loader, how, sizeof(how)) == PW_ERR_PRECONDITION);
+    assert(pw_audio_in_ps5_resolve(&found, NULL, how, 4) == PW_ERR_PRECONDITION);
+}
+
 int main(void)
 {
     test_init();
@@ -223,6 +283,7 @@ int main(void)
     test_read_and_silent_state();
     test_reopen_silent();
     test_reopen_plug();
+    test_resolve();
     puts("audio in passed");
     return 0;
 }

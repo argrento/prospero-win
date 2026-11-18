@@ -2767,15 +2767,21 @@ int main(int argc, char **argv)
             const int user = pad_status == PW_OK && pad.user_id >= 0 ? (int)pad.user_id : -1;
             const int reopen = pw_audio_in_ps5_reopen_policy(debug_env_value(game, "PW_AUDIO_MIC_REOPEN"));
             const int off = game && !game->audio.microphone;
+            /* calls= says how libSceAudioIn was reached (direct, dlsym, or
+             * what each lookup answered); "-" when it was not tried. */
+            char calls[160] = "-";
             int microphone_status = off ? PW_ERR_UNSUPPORTED : !set_input ? PW_ERR_NOT_FOUND :
-                                    user < 0 ? PW_ERR_STATE : pw_audio_in_ps5_platform_ops(&microphone_ops);
+                                    user < 0 ? PW_ERR_STATE :
+                                    pw_audio_in_ps5_platform_ops(&microphone_ops, calls, sizeof(calls));
             microphone_ops.log = microphone_log;
             if (microphone_status == PW_OK)
                 microphone_status = pw_audio_in_ps5_init(&audio_in, &microphone_ops, user, reopen);
             if (microphone_status == PW_OK) set_input(&microphone, NULL);
-            PS5LOG_LOG("PW_WINE64 microphone=%s user=%d reopen=%s", off ? "off" : pw_result_name(microphone_status), user,
+            PS5LOG_LOG("PW_WINE64 microphone=%s user=%d reopen=%s sink=%s calls=%s",
+                       off ? "off" : pw_result_name(microphone_status), user,
                        reopen == PW_AUDIO_IN_PS5_REOPEN_PLUG ? "plug" :
-                       reopen == PW_AUDIO_IN_PS5_REOPEN_NONE ? "none" : "silent");
+                       reopen == PW_AUDIO_IN_PS5_REOPEN_NONE ? "none" : "silent",
+                       set_input ? "ok" : "missing", calls);
         }
         /* The game starts in its profile's working directory. A title
          * cannot chdir, so ntdll keeps a logical one (wine/ps5/pw_wine_cwd.h),
