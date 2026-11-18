@@ -15,11 +15,12 @@ answer it.
 
   ```sh
   x86_64-w64-mingw32-gcc -O2 -o audio_capture_lab.exe \
-      tests/lab/audio_capture_lab.c -lole32 -luuid
+      tests/lab/audio_capture_lab.c -lole32 -luuid -lgdi32 -luser32
   ```
 
   Copy it into a game's folder, or run it as its own program with a profile
-  of its own. It writes `audio_capture_lab.txt` beside itself.
+  of its own. It writes `audio_capture_lab.txt` beside itself, and each
+  line, starting `MICLAB`, to stderr, which the title log keeps.
 
 The log lines below are in the title's session log.
 
@@ -70,8 +71,13 @@ screen with music.
 
 ## 2. The microphone
 
-Run `audio_capture_lab.exe` (`audio_capture_lab.exe 5` records five
-seconds). Speak while it records. It plays the recording back.
+Run `audio_capture_lab.exe`. It shows Record and Play buttons, the level
+while it records, and every render and capture endpoint with its state,
+read again each second. Cross records or stops, Circle plays or stops; if
+Cross moves a pointer instead (a launcher's Mouse preset), hold the
+touchpad for 2 seconds first. Speak while it records, then play it back.
+"0.0 s recorded in 7.2 s" means capture is not keeping time: see the
+`input result=` lines below.
 
 1. Run it with only the DualSense, then with a headset with a microphone in
    the jack, then with a USB headset.
