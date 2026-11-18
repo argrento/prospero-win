@@ -4,8 +4,9 @@
  * default capture device and plays them back on the default render device,
  * through WASAPI (winmm's waveIn and DirectSound capture sit on the same
  * mmdevapi). It writes what it saw to audio_capture_lab.txt beside itself
- * and to stdout, so a console run shows whether a game would find a
- * microphone, at what format, and whether its samples carry sound.
+ * and to stdout and stderr (a title's log keeps stderr), so a console run
+ * shows whether a game would find a microphone, at what format, and
+ * whether its samples carry sound.
  *
  *   x86_64-w64-mingw32-gcc -O2 -o audio_capture_lab.exe \
  *       tests/lab/audio_capture_lab.c -lole32 -luuid
@@ -30,6 +31,9 @@ static void say(const char *format, ...)
     va_list args;
     va_start(args, format);
     vprintf(format, args);
+    va_end(args);
+    va_start(args, format);
+    vfprintf(stderr, format, args);
     va_end(args);
     if (out) {
         va_start(args, format);
