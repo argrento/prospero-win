@@ -125,9 +125,11 @@
  *   system_locale = ja-JP       ; Windows' system locale, which sets the code
  *                               ; page of programs that are not Unicode
  *                               ; (LC_CTYPE=ja_JP.UTF-8; Wine patch 1028)
- *   user_locale = en-US         ; Windows' user locale: the language and
- *                               ; formats the game is told about
- *                               ; (LC_MESSAGES=en_US.UTF-8). Both take one
+ *   user_locale = en-US         ; Windows' user locale, which Wine uses
+ *                               ; for the UI language the game is told
+ *                               ; (LC_MESSAGES=en_US.UTF-8). Wine takes
+ *                               ; the formats (GetUserDefaultLocaleName)
+ *                               ; from system_locale. Both take one
  *                               ; of en-US en-GB de-DE fr-FR es-ES it-IT
  *                               ; pt-BR pl-PL ru-RU ja-JP ko-KR zh-CN
  *                               ; zh-TW; default: Wine's, en-US
