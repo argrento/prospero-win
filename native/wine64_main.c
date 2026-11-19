@@ -2097,6 +2097,12 @@ int main(int argc, char **argv)
     static PwGameInput game_input;
     static PwGameInput other_input;     /* [launcher]: the preset not in use */
     static PwInputSwitch input_switch;
+    /* [input] map = 1: the input map (src/pw_input_map.h) and this tick's
+     * controller and events from it. */
+    static PwInputMapState input_map;
+    static PwPadPs5 map_pad;
+    static PwWineInput map_events[PW_INPUT_MAP_EVENT_MAX];
+    size_t map_count = 0;
     const char *input_label = "", *other_label = "";
     int has_other_input = 0, needs_xinput = 0, needs_playstation = 0;
     /* [input] player2: a second signed-in user's DualSense as more keys. */
@@ -2590,6 +2596,8 @@ int main(int argc, char **argv)
                    game_input.mode == PW_GAME_INPUT_XINPUT ? "xinput" :
                    game_input.mode == PW_GAME_INPUT_PLAYSTATION ? "playstation" : "keyboard", (int)game_input.mouse,
                    (unsigned)game_input.rumble, effective_dll_overrides[0] ? effective_dll_overrides : "-");
+        if (game_input.map.on || other_input.map.on)
+            PS5LOG_LOG("PW_WINE64 input map=%d other=%d", game_input.map.on, other_input.map.on);
         /* What Wine gives the game as NumberOfProcessors. */
         PS5LOG_LOG("PW_WINE64 cpus online=%ld", sysconf(_SC_NPROCESSORS_ONLN));
         {
@@ -3182,14 +3190,18 @@ int main(int argc, char **argv)
             /* What the old preset holds down comes up, as does what was let go
              * this tick, and the new one starts from the next press. Before
              * controller 0 is fed, so that the controller and the keys
-             * follow the same preset on this tick. */
-            size_t count = pw_wine_game_inputs(&game_input, 0, game_pad.core.previous_buttons | game_pad.core.released_edges,
-                                               events, sizeof(events) / sizeof(events[0]) - 1);
+             * follow the same preset on this tick. A map lets go of all it
+             * holds, and one swapped in keeps what is held from the game
+             * until it is let go. */
+            size_t count = game_input.map.on ?
+                pw_wine_input_map_release(&input_map, &game_input, NULL, map_events, PW_INPUT_MAP_EVENT_MAX) :
+                pw_wine_game_inputs(&game_input, 0, game_pad.core.previous_buttons | game_pad.core.released_edges,
+                                    map_events, PW_INPUT_MAP_EVENT_MAX);
             PwGameInput swap = game_input;
             const char *label = input_label;
 
             for (size_t i = 0; i < count; i++) {
-                if (post_input(&events[i]) == 0) posted++;
+                if (post_input(&map_events[i]) == 0) posted++;
                 else refused++;
             }
             game_input = other_input;
@@ -3198,6 +3210,32 @@ int main(int argc, char **argv)
             other_label = label;
             input_switch_notify(input_label);
             game_pad.core.released_edges = 0;
+            if (game_input.map.on) {
+                pw_input_map_init(&input_map);
+                (void)pw_wine_input_map_release(&input_map, &game_input, &game_pad, map_events, PW_INPUT_MAP_EVENT_MAX);
+            }
+        }
+        /* The menu or the console's keyboard has the pad: the map lets go,
+         * and what the real pad holds stays away from the game until it is
+         * let go, sticks and triggers as well as buttons. */
+        if (pad_read && game_input.map.on && others_idle) {
+            size_t count = pw_wine_input_map_release(&input_map, &game_input, &pad, map_events, PW_INPUT_MAP_EVENT_MAX);
+            for (size_t i = 0; i < count; i++) {
+                if (post_input(&map_events[i]) == 0) posted++;
+                else refused++;
+            }
+        }
+        /* The map's controller and events for this tick, from the pad as the
+         * game sees it; posted below, with the rumble. While the menu or the
+         * keyboard has the pad the map does not run, so what it keeps from
+         * the game stays kept, and the controller is idle. */
+        map_count = 0;
+        if (pad_read && game_input.map.on && others_idle) {
+            map_pad = *seen;
+            map_pad.core.previous_buttons = map_pad.core.pressed_edges = map_pad.core.released_edges = 0;
+        } else if (pad_read && game_input.map.on) {
+            map_count = pw_wine_input_map(&input_map, &game_input, seen, PW_WINE64_TICK_US, &map_pad, map_events,
+                                          PW_INPUT_MAP_EVENT_MAX);
         }
         /* XInput controller 0: the DualSense, and in a script build the
          * macro's controller added to it, every frame, so a scripted press
@@ -3207,7 +3245,8 @@ int main(int argc, char **argv)
             PwWinePadExtra extra_state;
             PwPadPs5 unbound;   /* without the buttons that send keys or mouse buttons */
 
-            if (pad_read) pw_wine_pad_unbound(seen, &game_input, &unbound);
+            if (pad_read && game_input.map.on) unbound = map_pad;
+            else if (pad_read) pw_wine_pad_unbound(seen, &game_input, &unbound);
             int connected = set_pad_extra ?
                             pw_wine_game_pad_playstation(pad_read ? &unbound : NULL, &state, &extra_state) :
                             pw_wine_game_pad(pad_read ? &unbound : NULL, &state), scripted = 0;
@@ -3306,11 +3345,18 @@ int main(int argc, char **argv)
                 }
             }
         }
+        if (pad_read && game_input.map.on) {
+            for (size_t i = 0; i < map_count; i++) {
+                if (post_input(&map_events[i]) == 0) posted++;
+                else refused++;
+            }
+        }
         if (pad_read) {
-            size_t count = pw_wine_game_inputs(&game_input, seen->core.pressed_edges,
+            size_t count = game_input.map.on ? 0 :
+                           pw_wine_game_inputs(&game_input, seen->core.pressed_edges,
                                                seen->core.released_edges, events,
                                                sizeof(events) / sizeof(events[0]) - 1);
-            if (game_input.mouse != PW_GAME_STICK_NONE) {
+            if (!game_input.map.on && game_input.mouse != PW_GAME_STICK_NONE) {
                 const PwPadPs5Stick *stick = game_input.mouse == PW_GAME_STICK_LEFT ?
                                              &seen->left_stick : &seen->right_stick;
                 count += (size_t)pw_wine_pointer_step(&pointer, stick->x, stick->y,
