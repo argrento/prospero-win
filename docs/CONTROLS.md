@@ -67,6 +67,17 @@ touchpad = space
 
 `mouse.input` is a starting point for games played with the mouse alone.
 
+### The input map
+
+With `map = 1` in a profile's `[input]` section, each DualSense input can
+send a controller button, a key or a combination of keys, a mouse button or
+the wheel, or nothing. A stick can be a controller stick, the d-pad, four
+keys, the pointer or the wheel, each with its own dead zone, curve and speed,
+and a trigger can be a button at a pull threshold. An input the map sends
+somewhere else no longer reaches the game's controller. See
+[INPUT_MAP.md](INPUT_MAP.md) for the lines and for templates that match the
+presets above.
+
 ### Xbox controller games
 
 Games from the Xbox 360 era and later read a controller through XInput. With
