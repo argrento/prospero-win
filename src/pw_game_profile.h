@@ -153,6 +153,14 @@
  * right options create touchpad. An input preset file holds only an [input]
  * section; the profile's own [input] lines override it. Unknown sections,
  * keys and values are refused, so a typo never plays with defaults.
+ *
+ * map = 1 in the profile's own [input] turns on the input map
+ * (docs/INPUT_MAP.md): each DualSense input says what it sends, a
+ * controller input, keys, the mouse or nothing, and lines such as
+ *   cross = key:ctrl+s     r2 = mouse:left      r2_threshold = 30
+ *   left_stick = keys      left_stick_keys = w,s,a,d
+ * replace the button lines above, preset, mouse and mouse_speed. Not in an
+ * input preset file or in [launcher], which keep the old lines.
  */
 #include "pw_app_profile.h"
 #include "pw_steam_view.h"
@@ -189,6 +197,58 @@ typedef struct PwGameBinding {
     uint16_t code;      /* KEY: Windows virtual key; MOUSE: 0 left, 1 right, 2 middle */
 } PwGameBinding;
 
+/* The input map (docs/INPUT_MAP.md). Inputs in the order of its input
+ * table; the sticks are apart. */
+enum { PW_GAME_MAP_INPUTS = 18, PW_GAME_MAP_COMBO = 4, PW_GAME_MAP_STICKS = 2 };
+typedef enum PwGameMapInput {
+    PW_GAME_MAP_CROSS = 0, PW_GAME_MAP_CIRCLE, PW_GAME_MAP_SQUARE, PW_GAME_MAP_TRIANGLE,
+    PW_GAME_MAP_L1, PW_GAME_MAP_R1, PW_GAME_MAP_L2, PW_GAME_MAP_R2, PW_GAME_MAP_L3, PW_GAME_MAP_R3,
+    PW_GAME_MAP_UP, PW_GAME_MAP_DOWN, PW_GAME_MAP_LEFT, PW_GAME_MAP_RIGHT,
+    PW_GAME_MAP_OPTIONS, PW_GAME_MAP_CREATE, PW_GAME_MAP_TOUCHPAD_LEFT, PW_GAME_MAP_TOUCHPAD_RIGHT,
+} PwGameMapInput;
+/* A button target: DEFAULT is "no line", the input's own controller input. */
+typedef enum PwGameMapKind { PW_GAME_MAP_DEFAULT = 0, PW_GAME_MAP_NONE, PW_GAME_MAP_PAD,
+                             PW_GAME_MAP_KEYS, PW_GAME_MAP_MOUSE } PwGameMapKind;
+typedef enum PwGameMapPad {
+    PW_GAME_PAD_A = 0, PW_GAME_PAD_B, PW_GAME_PAD_X, PW_GAME_PAD_Y, PW_GAME_PAD_LB, PW_GAME_PAD_RB,
+    PW_GAME_PAD_LT, PW_GAME_PAD_RT, PW_GAME_PAD_LS, PW_GAME_PAD_RS, PW_GAME_PAD_DPAD_UP,
+    PW_GAME_PAD_DPAD_DOWN, PW_GAME_PAD_DPAD_LEFT, PW_GAME_PAD_DPAD_RIGHT, PW_GAME_PAD_START,
+    PW_GAME_PAD_BACK, PW_GAME_PAD_GUIDE, PW_GAME_PAD_TOUCHPAD, PW_GAME_PAD_COUNT
+} PwGameMapPad;
+/* MOUSE codes: 0 left, 1 right, 2 middle, 3 back (X1), 4 forward (X2), and
+ * one wheel notch for each press. */
+typedef enum PwGameMapMouse { PW_GAME_MOUSE_LEFT = 0, PW_GAME_MOUSE_RIGHT, PW_GAME_MOUSE_MIDDLE,
+                              PW_GAME_MOUSE_BACK, PW_GAME_MOUSE_FORWARD, PW_GAME_MOUSE_WHEEL_UP,
+                              PW_GAME_MOUSE_WHEEL_DOWN } PwGameMapMouse;
+typedef struct PwGameMapTarget {
+    uint8_t kind;       /* PwGameMapKind */
+    uint8_t code;       /* PAD: PwGameMapPad; MOUSE: PwGameMapMouse */
+    uint8_t count;      /* KEYS: 1..PW_GAME_MAP_COMBO, pressed in order */
+    uint8_t keys[PW_GAME_MAP_COMBO];    /* Windows virtual keys */
+} PwGameMapTarget;
+typedef enum PwGameStickMode { PW_GAME_STICK_MODE_DEFAULT = 0, PW_GAME_STICK_MODE_PAD_LEFT,
+                               PW_GAME_STICK_MODE_PAD_RIGHT, PW_GAME_STICK_MODE_DPAD,
+                               PW_GAME_STICK_MODE_KEYS, PW_GAME_STICK_MODE_MOUSE,
+                               PW_GAME_STICK_MODE_WHEEL, PW_GAME_STICK_MODE_NONE } PwGameStickMode;
+typedef enum PwGameCurve { PW_GAME_CURVE_LINEAR = 1, PW_GAME_CURVE_SQUARED = 2,
+                           PW_GAME_CURVE_CUBED = 3 } PwGameCurve;
+/* After parsing, mode and every tuning value are resolved: a missing line
+ * holds its default. */
+typedef struct PwGameMapStick {
+    uint8_t mode;       /* PwGameStickMode, never DEFAULT once parsed */
+    uint8_t deadzone, outer, curve;     /* percent, percent, PwGameCurve */
+    uint32_t speed;     /* mouse: pixels a second; wheel: notches a second */
+    uint8_t invert_x, invert_y;
+    uint8_t keys[4];    /* keys mode: up, down, left, right; 0 for none */
+} PwGameMapStick;
+typedef struct PwGameMap {
+    int on;                                         /* map = 1 */
+    PwGameMapTarget inputs[PW_GAME_MAP_INPUTS];     /* in PwGameMapInput order */
+    uint8_t threshold[2];       /* l2, r2: percent, 0 for the DualSense's own click */
+    PwGameMapStick stick[PW_GAME_MAP_STICKS];       /* left, right */
+    uint64_t seen;              /* the lines read, for repeats and the checks */
+} PwGameMap;
+
 typedef struct PwGameInput {
     PwGameInputMode mode;
     PwGameStick mouse;
@@ -198,6 +258,7 @@ typedef struct PwGameInput {
     char preset[PW_APP_ID_CAPACITY];
     char player2[PW_APP_ID_CAPACITY];   /* the second pad's preset, profile only */
     uint32_t set;       /* which of mode/mouse/mouse_speed/rumble a file set (overlay) */
+    PwGameMap map;      /* map = 1: the input map, profile only */
 } PwGameInput;
 
 typedef struct PwGameDisplay {
@@ -346,6 +407,9 @@ void pw_game_input_overlay(PwGameInput *base, const PwGameInput *overrides);
  * no pointer is in xinput mode, so a game with gamepad support reads the
  * DualSense while the keyboard and mouse keep working. */
 void pw_game_input_default_mode(PwGameInput *input);
+/* The target an input of the map sends: its line's, or for no line its own
+ * controller input in that mode (docs/INPUT_MAP.md, "A missing line"). */
+PwGameMapTarget pw_game_map_target(const PwGameMap *map, size_t input, PwGameInputMode mode);
 /* The DualSense bit of button index i (PW_GAME_BUTTON order), 0 if none. */
 uint32_t pw_game_button_mask(size_t index);
 #endif

@@ -965,8 +965,184 @@ static void test_environment(void)
     }
 }
 
+/* The input map (docs/INPUT_MAP.md): its lines, its defaults and what it refuses. */
+static void test_input_map(void)
+{
+    PwGameProfile p;
+    PwGameMapTarget t;
+
+    /* the grammar's own example */
+    assert(parse(APP "[input]\nmode = keyboard\nmap = 1\ncross = key:space\ncircle = key:ctrl\nsquare = key:r\n"
+                 "triangle = key:e\nl2 = mouse:right\nr2 = mouse:left\nr2_threshold = 30\nup = mouse:wheel_up\n"
+                 "down = mouse:wheel_down\nleft_stick = keys\nleft_stick_keys = w,s,a,d\nright_stick = mouse\n"
+                 "right_stick_speed = 1500\n", &p) == PW_OK);
+    assert(p.input.map.on && p.input.mode == PW_GAME_INPUT_KEYBOARD);
+    t = p.input.map.inputs[PW_GAME_MAP_CROSS];
+    assert(t.kind == PW_GAME_MAP_KEYS && t.count == 1 && t.keys[0] == 0x20);
+    assert(p.input.map.inputs[PW_GAME_MAP_CIRCLE].keys[0] == 0x11);
+    assert(p.input.map.inputs[PW_GAME_MAP_SQUARE].keys[0] == 'R');
+    t = p.input.map.inputs[PW_GAME_MAP_R2];
+    assert(t.kind == PW_GAME_MAP_MOUSE && t.code == PW_GAME_MOUSE_LEFT && p.input.map.threshold[1] == 30 &&
+           p.input.map.threshold[0] == 0);
+    assert(p.input.map.inputs[PW_GAME_MAP_UP].code == PW_GAME_MOUSE_WHEEL_UP);
+    assert(p.input.map.inputs[PW_GAME_MAP_L1].kind == PW_GAME_MAP_DEFAULT);
+    {
+        const PwGameMapStick *l = &p.input.map.stick[0], *r = &p.input.map.stick[1];
+        assert(l->mode == PW_GAME_STICK_MODE_KEYS && l->deadzone == 40 && !memcmp(l->keys, "WSAD", 4));
+        assert(r->mode == PW_GAME_STICK_MODE_MOUSE && r->speed == 1500 && r->deadzone == 16 && r->outer == 0 &&
+               r->curve == PW_GAME_CURVE_SQUARED && !r->invert_x && !r->invert_y);
+    }
+    /* no line: the input's own controller input, the touchpad by mode */
+    assert(parse(APP "[input]\nmode = xinput\nmap = 1\n", &p) == PW_OK && p.input.map.on);
+    t = pw_game_map_target(&p.input.map, PW_GAME_MAP_CROSS, PW_GAME_INPUT_XINPUT);
+    assert(t.kind == PW_GAME_MAP_PAD && t.code == PW_GAME_PAD_A);
+    assert(pw_game_map_target(&p.input.map, PW_GAME_MAP_CREATE, PW_GAME_INPUT_XINPUT).code == PW_GAME_PAD_BACK);
+    assert(pw_game_map_target(&p.input.map, PW_GAME_MAP_TOUCHPAD_LEFT, PW_GAME_INPUT_XINPUT).code == PW_GAME_PAD_BACK);
+    assert(pw_game_map_target(&p.input.map, PW_GAME_MAP_TOUCHPAD_RIGHT, PW_GAME_INPUT_XINPUT).code == PW_GAME_PAD_GUIDE);
+    assert(pw_game_map_target(&p.input.map, PW_GAME_MAP_TOUCHPAD_LEFT, PW_GAME_INPUT_PLAYSTATION).code ==
+           PW_GAME_PAD_TOUCHPAD);
+    assert(pw_game_map_target(&p.input.map, PW_GAME_MAP_R2, PW_GAME_INPUT_KEYBOARD).code == PW_GAME_PAD_RT);
+    assert(p.input.map.stick[0].mode == PW_GAME_STICK_MODE_PAD_LEFT && p.input.map.stick[1].mode ==
+           PW_GAME_STICK_MODE_PAD_RIGHT && p.input.map.stick[0].deadzone == 0 &&
+           p.input.map.stick[0].curve == PW_GAME_CURVE_LINEAR);
+    /* a line that states the default means the same */
+    assert(parse(APP "[input]\nmap = 1\ncross = pad:a\nleft_stick = pad:left_stick\nleft_stick_deadzone = 0\n"
+                 "left_stick_curve = linear\n", &p) == PW_OK);
+    /* without a mode line the map plays as the xinput controller, as no binding does today */
+    assert(p.input.mode == PW_GAME_INPUT_KEYBOARD);
+    {
+        PwGameInput input;
+        pw_game_input_init(&input);
+        pw_game_input_overlay(&input, &p.input);
+        pw_game_input_default_mode(&input);
+        assert(input.map.on && input.mode == PW_GAME_INPUT_XINPUT);
+    }
+    /* every target form */
+    assert(parse(APP "[input]\nmap = 1\ncross = key:ctrl+shift+s\ncircle = key:lctrl+rctrl+lalt+f12\n"
+                 "square = key:vk:0xe2\ntriangle = mouse:back\nl1 = mouse:forward\nr1 = mouse:middle\n"
+                 "l3 = none\nr3 = pad:guide\nup = pad:touchpad\ndown = pad:lt\nleft = key:semicolon\n"
+                 "right = key:num0+decimal+multiply+divide\noptions = key:apps\ncreate = key:printscreen\n"
+                 "touchpad_left = key:rwin\ntouchpad_right = key:f24\n", &p) == PW_OK);
+    t = p.input.map.inputs[PW_GAME_MAP_CROSS];
+    assert(t.count == 3 && t.keys[0] == 0x11 && t.keys[1] == 0x10 && t.keys[2] == 'S');
+    t = p.input.map.inputs[PW_GAME_MAP_CIRCLE];
+    assert(t.count == 4 && t.keys[0] == 0xa2 && t.keys[1] == 0xa3 && t.keys[2] == 0xa4 && t.keys[3] == 0x7b);
+    assert(p.input.map.inputs[PW_GAME_MAP_SQUARE].keys[0] == 0xe2);
+    assert(p.input.map.inputs[PW_GAME_MAP_TRIANGLE].code == PW_GAME_MOUSE_BACK);
+    assert(p.input.map.inputs[PW_GAME_MAP_L1].code == PW_GAME_MOUSE_FORWARD);
+    assert(p.input.map.inputs[PW_GAME_MAP_L3].kind == PW_GAME_MAP_NONE);
+    assert(p.input.map.inputs[PW_GAME_MAP_DOWN].kind == PW_GAME_MAP_PAD &&
+           p.input.map.inputs[PW_GAME_MAP_DOWN].code == PW_GAME_PAD_LT);
+    assert(p.input.map.inputs[PW_GAME_MAP_LEFT].keys[0] == 0xba);
+    t = p.input.map.inputs[PW_GAME_MAP_RIGHT];
+    assert(t.count == 4 && t.keys[0] == 0x60 && t.keys[1] == 0x6e && t.keys[2] == 0x6a && t.keys[3] == 0x6f);
+    assert(p.input.map.inputs[PW_GAME_MAP_TOUCHPAD_RIGHT].keys[0] == 0x87);
+    /* stick modes and their tuning */
+    assert(parse(APP "[input]\nmap = 1\nleft_stick = pad:right_stick\nleft_stick_deadzone = 20\n"
+                 "left_stick_outer = 10\nleft_stick_curve = cubed\nleft_stick_invert_x = true\n"
+                 "left_stick_invert_y = false\nright_stick = wheel\nright_stick_speed = 100\n"
+                 "right_stick_invert_y = true\n", &p) == PW_OK);
+    assert(p.input.map.stick[0].mode == PW_GAME_STICK_MODE_PAD_RIGHT && p.input.map.stick[0].deadzone == 20 &&
+           p.input.map.stick[0].outer == 10 && p.input.map.stick[0].curve == PW_GAME_CURVE_CUBED &&
+           p.input.map.stick[0].invert_x == 1);
+    assert(p.input.map.stick[1].mode == PW_GAME_STICK_MODE_WHEEL && p.input.map.stick[1].speed == 100 &&
+           p.input.map.stick[1].invert_y && p.input.map.stick[1].deadzone == 16);
+    assert(parse(APP "[input]\nmap = 1\nright_stick_deadzone = 25\nright_stick = pad:dpad\n", &p) == PW_OK);
+    assert(p.input.map.stick[1].mode == PW_GAME_STICK_MODE_DPAD && p.input.map.stick[1].deadzone == 25);
+    assert(parse(APP "[input]\nmap = 1\nleft_stick = keys\nleft_stick_keys = up,none,none,shift\n", &p) == PW_OK);
+    assert(!memcmp(p.input.map.stick[0].keys, "\x26\0\0\x10", 4));
+    assert(parse(APP "[input]\nmap = 1\nr2 = pad:a\nr2_threshold = 5\nl2 = key:x\nl2_threshold = 100\n", &p) ==
+           PW_OK && p.input.map.threshold[0] == 100 && p.input.map.threshold[1] == 5);
+    assert(parse(APP "[input]\nmap = 1\nl2 = pad:rt\nr2 = pad:lt\n", &p) == PW_OK);
+    /* mode, rumble and player2 keep their meaning */
+    assert(parse(APP "[input]\nmode = playstation\nrumble = 40\nmap = 1\nplayer2 = p2\ncross = pad:b\n", &p) == PW_OK &&
+           p.input.mode == PW_GAME_INPUT_PLAYSTATION && p.input.rumble == 40 && !strcmp(p.input.player2, "p2"));
+    assert(parse(APP "[input]\nmap = 1\nmode = keyboard\n", &p) == PW_OK);
+
+    static const char *const refused[] = {
+        /* where map goes */
+        "[input]\nmap = 2\n", "[input]\nmap = true\n", "[input]\nmap = 1\nmap = 1\n", "[input]\nMap = 1\n",
+        "[input]\ncross = space\nmap = 1\n", "[input]\ncross = none\nmap = 1\n",
+        "[input]\npreset = gamepad\nmap = 1\n", "[input]\nmouse = left_stick\nmap = 1\n",
+        "[input]\nmouse_speed = 900\nmap = 1\n", "[input]\nleft_stick = keys\nmap = 1\n",
+        "[input]\nmap = 1\npreset = gamepad\n", "[input]\nmap = 1\nmouse = none\n",
+        "[input]\nmap = 1\nmouse_speed = 900\n", "[launcher]\nmap = 1\n",
+        /* old-style values and the old touchpad */
+        "[input]\nmap = 1\ncross = z\n", "[input]\nmap = 1\nr2 = mouse_left\n", "[input]\nmap = 1\ncross = vk:0x41\n",
+        "[input]\nmap = 1\ntouchpad = pad:back\n", "[input]\nmap = 1\nps = none\n",
+        /* case, spaces, repeats */
+        "[input]\nmap = 1\ncross = KEY:space\n", "[input]\nmap = 1\nCross = key:space\n",
+        "[input]\nmap = 1\ncross = key:Space\n", "[input]\nmap = 1\ncross = key:ctrl + s\n",
+        "[input]\nmap = 1\ncross = key:a\ncross = key:b\n", "[input]\nmap = 1\nleft_stick_keys = w, s, a, d\nleft_stick = keys\n",
+        "[input]\nmap = 1\nleft_stick = mouse\nleft_stick = mouse\n",
+        "[input]\nmap = 1\nleft_stick = mouse\nleft_stick_speed = 900\nleft_stick_speed = 900\n",
+        /* targets */
+        "[input]\nmap = 1\ncross = pad:\n", "[input]\nmap = 1\ncross = pad:left_stick\n", "[input]\nmap = 1\ncross = pad:z\n",
+        "[input]\nmap = 1\ncross = mouse:x1\n", "[input]\nmap = 1\ncross = key:\n", "[input]\nmap = 1\ncross = key:+a\n",
+        "[input]\nmap = 1\ncross = key:a+\n", "[input]\nmap = 1\ncross = key:a+a\n",
+        "[input]\nmap = 1\ncross = key:shift+ctrl+s\n", "[input]\nmap = 1\ncross = key:s+ctrl\n",
+        "[input]\nmap = 1\ncross = key:ctrl+shift+alt+lwin+s\n", "[input]\nmap = 1\ncross = key:vk:0x20\n",
+        "[input]\nmap = 1\ncross = key:vk:0x41\n", "[input]\nmap = 1\ncross = key:vk:0x00\n",
+        "[input]\nmap = 1\ncross = key:vk:0xE2\n", "[input]\nmap = 1\ncross = key:vk:0x11\n",
+        "[input]\nmap = 1\ncross = key:f0\n", "[input]\nmap = 1\ncross = key:f25\n", "[input]\nmap = 1\ncross = key:f01\n",
+        "[input]\nmap = 1\ncross = key:none\n", "[input]\nmap = 1\ncross = key:;\n", "[input]\nmap = 1\ncross = key:numpad0\n",
+        /* thresholds */
+        "[input]\nmap = 1\nr2_threshold = 30\n", "[input]\nmap = 1\nr2 = pad:rt\nr2_threshold = 30\n",
+        "[input]\nmap = 1\nr2 = pad:lt\nr2_threshold = 30\n", "[input]\nmap = 1\nr2 = none\nr2_threshold = 30\n",
+        "[input]\nmap = 1\nr2 = key:a\nr2_threshold = 4\n", "[input]\nmap = 1\nr2 = key:a\nr2_threshold = 101\n",
+        "[input]\nmap = 1\nr2 = key:a\nr2_threshold = 030\n", "[input]\nmap = 1\ncross_threshold = 30\n",
+        /* sticks */
+        "[input]\nmap = 1\nleft_stick = pad:left\n", "[input]\nmap = 1\nleft_stick = mouse_left\n",
+        "[input]\nmap = 1\nleft_stick = keys\n", "[input]\nmap = 1\nleft_stick_keys = w,s,a,d\n",
+        "[input]\nmap = 1\nleft_stick = mouse\nleft_stick_keys = w,s,a,d\n",
+        "[input]\nmap = 1\nleft_stick = keys\nleft_stick_keys = w,s,a\n",
+        "[input]\nmap = 1\nleft_stick = keys\nleft_stick_keys = w,s,a,d,e\n",
+        "[input]\nmap = 1\nleft_stick = keys\nleft_stick_keys = w,w,a,d\n",
+        "[input]\nmap = 1\nleft_stick = keys\nleft_stick_keys = w,s,a,ctrl+d\n",
+        "[input]\nmap = 1\nleft_stick = keys\nleft_stick_keys = key:w,s,a,d\n",
+        "[input]\nmap = 1\nleft_stick = keys\nleft_stick_keys = w,s,a,d\nleft_stick_outer = 5\n",
+        "[input]\nmap = 1\nleft_stick = keys\nleft_stick_keys = w,s,a,d\nleft_stick_deadzone = 5\n",
+        "[input]\nmap = 1\nleft_stick = pad:dpad\nleft_stick_curve = linear\n",
+        "[input]\nmap = 1\nleft_stick_speed = 900\n", "[input]\nmap = 1\nleft_stick = pad:dpad\nleft_stick_speed = 9\n",
+        "[input]\nmap = 1\nleft_stick = none\nleft_stick_deadzone = 10\n",
+        "[input]\nmap = 1\nleft_stick = none\nleft_stick_invert_y = false\n",
+        "[input]\nmap = 1\nleft_stick = wheel\nleft_stick_invert_x = true\n",
+        "[input]\nmap = 1\nleft_stick = wheel\nleft_stick_speed = 101\n",
+        "[input]\nmap = 1\nleft_stick = mouse\nleft_stick_speed = 0\n",
+        "[input]\nmap = 1\nleft_stick = mouse\nleft_stick_speed = 20001\n",
+        "[input]\nmap = 1\nleft_stick_deadzone = 91\n", "[input]\nmap = 1\nleft_stick_outer = 51\n",
+        "[input]\nmap = 1\nleft_stick_deadzone = 50\nleft_stick_outer = 41\n",
+        "[input]\nmap = 1\nleft_stick_curve = quadratic\n", "[input]\nmap = 1\nleft_stick_invert_x = 1\n",
+        "[input]\nmap = 1\nleft_stick_deadzone = 08\n", "[input]\nmap = 1\nleft_stick_dead = 8\n",
+        "[input]\nmap = 1\nstick_deadzone = 8\n", "[input]\nmap = 1\nleft_stick_ = 8\n",
+    };
+    for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+        char text[1024];
+        snprintf(text, sizeof(text), "%s%s", APP, refused[i]);
+        if (parse(text, &p) == PW_OK) {
+            fprintf(stderr, "accepted: %s\n", refused[i]);
+            assert(0);
+        }
+    }
+    assert(parse(APP "[input]\nmap = 1\nleft_stick_deadzone = 50\nleft_stick_outer = 40\n", &p) == PW_OK);
+    /* the map is the profile's alone: never in a preset file, and the tuning lines need it */
+    {
+        PwGameInput input;
+        pw_game_input_init(&input);
+        assert(preset("[input]\nmap = 1\n", &input) != PW_OK && !input.map.on);
+        assert(preset("[input]\ncross = key:space\n", &input) != PW_OK);
+    }
+    assert(parse(APP "[input]\nleft_stick = keys\n", &p) != PW_OK);
+    assert(parse(APP "[input]\ntouchpad_left = z\n", &p) != PW_OK);
+    /* [launcher] keeps the old lines beside a mapped [input] */
+    assert(parse(APP "[input]\nmode = xinput\nmap = 1\ncross = pad:b\n[launcher]\nmode = keyboard\nmouse = left_stick\n"
+                 "cross = mouse_left\n", &p) == PW_OK && p.input.map.on && !p.launcher_input.map.on &&
+           p.launcher_input.bindings[CROSS].kind == PW_GAME_BIND_MOUSE);
+}
+
 int main(void)
 {
+    test_input_map();
     test_graphics_env();
     test_published_forms();
     test_profile();
@@ -983,6 +1159,6 @@ int main(void)
     test_presets();
     test_default_mode();
     printf("game profile passed: application plus display and input, every binding kind, "
-           "the video output's refresh and frame rate, runtime settings and their environment, the CPU backend choice, debug env and [environment] variables, refusals, shared presets overridden by the profile\n");
+           "the video output's refresh and frame rate, runtime settings and their environment, the CPU backend choice, debug env and [environment] variables, refusals, shared presets overridden by the profile, the input map\n");
     return 0;
 }

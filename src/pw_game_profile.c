@@ -112,9 +112,360 @@ static int preset_name(char *out, size_t capacity, const uint8_t *v, size_t n)
     return PW_OK;
 }
 
+
+/* ---- The input map (docs/INPUT_MAP.md) ---------------------------------
+ * Strict, as the grammar says: names and values in lower case, numbers
+ * without a leading zero, no space inside a value, each line once. */
+
+static int same(const uint8_t *text, size_t length, const char *name);
+
+/* map->seen bits: the map line, the inputs, the thresholds, the sticks and
+ * each stick's tuning lines. */
+enum { MAP_SEEN_ON = 0, MAP_SEEN_INPUT = 1, MAP_SEEN_THRESHOLD = MAP_SEEN_INPUT + PW_GAME_MAP_INPUTS,
+       MAP_SEEN_STICK = MAP_SEEN_THRESHOLD + 2, MAP_SEEN_TUNING = MAP_SEEN_STICK + PW_GAME_MAP_STICKS };
+enum { TUNE_DEADZONE, TUNE_OUTER, TUNE_CURVE, TUNE_SPEED, TUNE_INVERT_X, TUNE_INVERT_Y, TUNE_KEYS, TUNE_COUNT };
+
+static const char *const map_inputs[PW_GAME_MAP_INPUTS] = {
+    "cross", "circle", "square", "triangle", "l1", "r1", "l2", "r2", "l3", "r3",
+    "up", "down", "left", "right", "options", "create", "touchpad_left", "touchpad_right",
+};
+static const char *const map_pads[PW_GAME_PAD_COUNT] = {
+    "a", "b", "x", "y", "lb", "rb", "lt", "rt", "ls", "rs", "dpad_up", "dpad_down", "dpad_left",
+    "dpad_right", "start", "back", "guide", "touchpad",
+};
+static const char *const map_mice[] = { "left", "right", "middle", "back", "forward", "wheel_up", "wheel_down" };
+static const char *const map_sticks[PW_GAME_MAP_STICKS] = { "left_stick", "right_stick" };
+static const char *const map_tunings[TUNE_COUNT] = { "deadzone", "outer", "curve", "speed", "invert_x",
+                                                     "invert_y", "keys" };
+
+/* Key names beyond a letter, a digit and f1-f24; modifiers in their
+ * written order first, so a combination's order can be checked. */
+enum { MAP_MODIFIERS = 11 };
+static const struct { const char *name; uint8_t vk; } map_keys[] = {
+    { "ctrl", 0x11 }, { "lctrl", 0xa2 }, { "rctrl", 0xa3 }, { "shift", 0x10 }, { "lshift", 0xa0 },
+    { "rshift", 0xa1 }, { "alt", 0x12 }, { "lalt", 0xa4 }, { "ralt", 0xa5 }, { "lwin", 0x5b }, { "rwin", 0x5c },
+    { "space", 0x20 }, { "enter", 0x0d }, { "escape", 0x1b }, { "tab", 0x09 }, { "backspace", 0x08 },
+    { "capslock", 0x14 }, { "pause", 0x13 }, { "printscreen", 0x2c }, { "scrolllock", 0x91 },
+    { "numlock", 0x90 }, { "insert", 0x2d }, { "delete", 0x2e }, { "home", 0x24 }, { "end", 0x23 },
+    { "pageup", 0x21 }, { "pagedown", 0x22 }, { "up", 0x26 }, { "down", 0x28 }, { "left", 0x25 },
+    { "right", 0x27 }, { "apps", 0x5d },
+    { "semicolon", 0xba }, { "equals", 0xbb }, { "comma", 0xbc }, { "minus", 0xbd }, { "period", 0xbe },
+    { "slash", 0xbf }, { "backquote", 0xc0 }, { "lbracket", 0xdb }, { "backslash", 0xdc },
+    { "rbracket", 0xdd }, { "quote", 0xde },
+    { "num0", 0x60 }, { "num1", 0x61 }, { "num2", 0x62 }, { "num3", 0x63 }, { "num4", 0x64 },
+    { "num5", 0x65 }, { "num6", 0x66 }, { "num7", 0x67 }, { "num8", 0x68 }, { "num9", 0x69 },
+    { "multiply", 0x6a }, { "add", 0x6b }, { "subtract", 0x6d }, { "decimal", 0x6e }, { "divide", 0x6f },
+};
+
+/* Whether a virtual key has a name of its own, which vk:0xNN may not stand in for. */
+static int map_named(uint32_t vk)
+{
+    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9') || (vk >= 0x70 && vk <= 0x87)) return 1;
+    for (size_t i = 0; i < sizeof(map_keys) / sizeof(map_keys[0]); i++)
+        if (map_keys[i].vk == vk) return 1;
+    return 0;
+}
+
+/* The modifier rank of a virtual key (0..MAP_MODIFIERS-1), or -1. */
+static int map_modifier(uint8_t vk)
+{
+    for (int i = 0; i < MAP_MODIFIERS; i++)
+        if (map_keys[i].vk == vk) return i;
+    return -1;
+}
+
+/* A whole number in [min, max], written without a leading zero. */
+static int map_number(const uint8_t *v, size_t n, uint32_t min, uint32_t max, uint32_t *out)
+{
+    uint32_t value = 0;
+
+    if (!n || n > 5 || (n > 1 && v[0] == '0')) return PW_ERR_MALFORMED;
+    for (size_t i = 0; i < n; i++) {
+        if (v[i] < '0' || v[i] > '9') return PW_ERR_MALFORMED;
+        value = value * 10u + (uint32_t)(v[i] - '0');
+    }
+    if (value < min || value > max) return PW_ERR_MALFORMED;
+    *out = value;
+    return PW_OK;
+}
+
+static int map_lower_hex(uint8_t c)
+{
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+}
+
+/* One key name: its virtual key, or 0 when it is none of them. */
+static uint8_t map_key(const uint8_t *v, size_t n)
+{
+    if (n == 1 && ((v[0] >= 'a' && v[0] <= 'z') || (v[0] >= '0' && v[0] <= '9')))
+        return (uint8_t)(v[0] >= 'a' ? v[0] - 'a' + 'A' : v[0]);
+    if ((n == 2 || n == 3) && v[0] == 'f') {
+        uint32_t f = 0;
+        if (map_number(v + 1, n - 1, 1, 24, &f) == PW_OK) return (uint8_t)(0x70 + f - 1);
+        return 0;
+    }
+    if (n == 7 && !memcmp(v, "vk:0x", 5)) {
+        int high = map_lower_hex(v[5]), low = map_lower_hex(v[6]);
+        uint32_t vk = (uint32_t)(high * 16 + low);
+        if (high < 0 || low < 0 || !vk || map_named(vk)) return 0;
+        return (uint8_t)vk;
+    }
+    for (size_t i = 0; i < sizeof(map_keys) / sizeof(map_keys[0]); i++)
+        if (same(v, n, map_keys[i].name)) return map_keys[i].vk;
+    return 0;
+}
+
+/* key:<name>[+<name>...]: 1 to 4 names, each once, modifiers first in their
+ * order, then the other keys. */
+static int map_combo(const uint8_t *v, size_t n, PwGameMapTarget *out)
+{
+    int rank = -1, others = 0;
+    size_t start = 0;
+
+    out->count = 0;
+    for (size_t i = 0; i <= n; i++) {
+        if (i < n && v[i] != '+') continue;
+        uint8_t vk = map_key(v + start, i - start);
+        int modifier;
+        if (!vk || out->count == PW_GAME_MAP_COMBO) return PW_ERR_MALFORMED;
+        for (size_t k = 0; k < out->count; k++)
+            if (out->keys[k] == vk) return PW_ERR_MALFORMED;
+        modifier = map_modifier(vk);
+        if (modifier >= 0) {
+            if (others || modifier <= rank) return PW_ERR_MALFORMED;
+            rank = modifier;
+        } else {
+            others = 1;
+        }
+        out->keys[out->count++] = vk;
+        start = i + 1;
+    }
+    return PW_OK;
+}
+
+static int map_target(const uint8_t *v, size_t n, PwGameMapTarget *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (same(v, n, "none")) { out->kind = PW_GAME_MAP_NONE; return PW_OK; }
+    if (n > 4 && !memcmp(v, "pad:", 4)) {
+        for (size_t i = 0; i < PW_GAME_PAD_COUNT; i++)
+            if (same(v + 4, n - 4, map_pads[i])) {
+                out->kind = PW_GAME_MAP_PAD;
+                out->code = (uint8_t)i;
+                return PW_OK;
+            }
+        return PW_ERR_UNSUPPORTED;
+    }
+    if (n > 6 && !memcmp(v, "mouse:", 6)) {
+        for (size_t i = 0; i < sizeof(map_mice) / sizeof(map_mice[0]); i++)
+            if (same(v + 6, n - 6, map_mice[i])) {
+                out->kind = PW_GAME_MAP_MOUSE;
+                out->code = (uint8_t)i;
+                return PW_OK;
+            }
+        return PW_ERR_UNSUPPORTED;
+    }
+    if (n > 4 && !memcmp(v, "key:", 4)) {
+        out->kind = PW_GAME_MAP_KEYS;
+        return map_combo(v + 4, n - 4, out);
+    }
+    return PW_ERR_UNSUPPORTED;
+}
+
+/* <stick>_keys = up,down,left,right: four key names or none, a name once. */
+static int map_stick_keys(const uint8_t *v, size_t n, uint8_t keys[4])
+{
+    size_t start = 0, count = 0;
+
+    for (size_t i = 0; i <= n; i++) {
+        if (i < n && v[i] != ',') continue;
+        if (count == 4) return PW_ERR_MALFORMED;
+        if (same(v + start, i - start, "none")) {
+            keys[count] = 0;
+        } else {
+            uint8_t vk = map_key(v + start, i - start);
+            if (!vk) return PW_ERR_MALFORMED;
+            for (size_t k = 0; k < count; k++)
+                if (keys[k] == vk) return PW_ERR_MALFORMED;
+            keys[count] = vk;
+        }
+        count++;
+        start = i + 1;
+    }
+    return count == 4 ? PW_OK : PW_ERR_MALFORMED;
+}
+
+static int map_true(const uint8_t *v, size_t n, uint8_t *out)
+{
+    if (same(v, n, "true")) *out = 1;
+    else if (same(v, n, "false")) *out = 0;
+    else return PW_ERR_UNSUPPORTED;
+    return PW_OK;
+}
+
+/* A line of the map after map = 1. */
+static int map_field(PwGameMap *map, const uint8_t *key, size_t key_length, const uint8_t *v, size_t n)
+{
+    uint64_t bit = 0;
+    int status = PW_ERR_UNSUPPORTED;
+
+    for (size_t i = 0; i < PW_GAME_MAP_INPUTS && !bit; i++) {
+        if (!same(key, key_length, map_inputs[i])) continue;
+        bit = 1ull << (MAP_SEEN_INPUT + i);
+        if (map->seen & bit) return PW_ERR_MALFORMED;
+        status = map_target(v, n, &map->inputs[i]);
+    }
+    for (size_t t = 0; t < 2 && !bit; t++) {
+        if (!same(key, key_length, t ? "r2_threshold" : "l2_threshold")) continue;
+        uint32_t threshold = 0;
+        bit = 1ull << (MAP_SEEN_THRESHOLD + t);
+        if (map->seen & bit) return PW_ERR_MALFORMED;
+        status = map_number(v, n, 5, 100, &threshold);
+        map->threshold[t] = (uint8_t)threshold;
+    }
+    for (size_t s = 0; s < PW_GAME_MAP_STICKS && !bit; s++) {
+        const size_t name = strlen(map_sticks[s]);
+        PwGameMapStick *stick = &map->stick[s];
+
+        if (same(key, key_length, map_sticks[s])) {
+            static const char *const modes[] = { NULL, "pad:left_stick", "pad:right_stick", "pad:dpad", "keys",
+                                                 "mouse", "wheel", "none" };
+            bit = 1ull << (MAP_SEEN_STICK + s);
+            if (map->seen & bit) return PW_ERR_MALFORMED;
+            for (size_t m = 1; m < sizeof(modes) / sizeof(modes[0]); m++)
+                if (same(v, n, modes[m])) { stick->mode = (uint8_t)m; status = PW_OK; }
+            break;
+        }
+        if (key_length <= name + 1 || memcmp(key, map_sticks[s], name) || key[name] != '_') continue;
+        for (size_t t = 0; t < TUNE_COUNT && !bit; t++) {
+            uint32_t value = 0;
+            if (!same(key + name + 1, key_length - name - 1, map_tunings[t])) continue;
+            bit = 1ull << (MAP_SEEN_TUNING + s * TUNE_COUNT + t);
+            if (map->seen & bit) return PW_ERR_MALFORMED;
+            switch (t) {
+            case TUNE_DEADZONE:
+                status = map_number(v, n, 0, 90, &value);
+                stick->deadzone = (uint8_t)value;
+                break;
+            case TUNE_OUTER:
+                status = map_number(v, n, 0, 50, &value);
+                stick->outer = (uint8_t)value;
+                break;
+            case TUNE_CURVE:
+                status = same(v, n, "linear") ? (stick->curve = PW_GAME_CURVE_LINEAR, PW_OK) :
+                         same(v, n, "squared") ? (stick->curve = PW_GAME_CURVE_SQUARED, PW_OK) :
+                         same(v, n, "cubed") ? (stick->curve = PW_GAME_CURVE_CUBED, PW_OK) : PW_ERR_UNSUPPORTED;
+                break;
+            case TUNE_SPEED:
+                /* the mode decides the top (mouse 20000, wheel 100), once it is known */
+                status = map_number(v, n, 1, PW_GAME_MOUSE_SPEED_MAX, &value);
+                stick->speed = value;
+                break;
+            case TUNE_INVERT_X: status = map_true(v, n, &stick->invert_x); break;
+            case TUNE_INVERT_Y: status = map_true(v, n, &stick->invert_y); break;
+            default: status = map_stick_keys(v, n, stick->keys); break;
+            }
+        }
+    }
+    if (!bit) return PW_ERR_UNSUPPORTED;
+    map->seen |= bit;
+    return status;
+}
+
+/* Once the section is read: the tuning lines against their stick's mode,
+ * thresholds against their trigger's target, and every missing value set to
+ * its default. */
+static int map_finish(PwGameMap *map)
+{
+    /* which tuning lines each mode takes, by PwGameStickMode */
+    static const uint8_t takes[] = {
+        [PW_GAME_STICK_MODE_PAD_LEFT] = 1u << TUNE_DEADZONE | 1u << TUNE_OUTER | 1u << TUNE_CURVE |
+                                        1u << TUNE_INVERT_X | 1u << TUNE_INVERT_Y,
+        [PW_GAME_STICK_MODE_PAD_RIGHT] = 1u << TUNE_DEADZONE | 1u << TUNE_OUTER | 1u << TUNE_CURVE |
+                                         1u << TUNE_INVERT_X | 1u << TUNE_INVERT_Y,
+        [PW_GAME_STICK_MODE_DPAD] = 1u << TUNE_DEADZONE | 1u << TUNE_INVERT_X | 1u << TUNE_INVERT_Y,
+        [PW_GAME_STICK_MODE_KEYS] = 1u << TUNE_DEADZONE | 1u << TUNE_INVERT_X | 1u << TUNE_INVERT_Y |
+                                    1u << TUNE_KEYS,
+        [PW_GAME_STICK_MODE_MOUSE] = 1u << TUNE_DEADZONE | 1u << TUNE_OUTER | 1u << TUNE_CURVE |
+                                     1u << TUNE_SPEED | 1u << TUNE_INVERT_X | 1u << TUNE_INVERT_Y,
+        [PW_GAME_STICK_MODE_WHEEL] = 1u << TUNE_DEADZONE | 1u << TUNE_OUTER | 1u << TUNE_CURVE |
+                                     1u << TUNE_SPEED | 1u << TUNE_INVERT_Y,
+        [PW_GAME_STICK_MODE_NONE] = 0,
+    };
+
+    for (size_t t = 0; t < 2; t++) {
+        const PwGameMapTarget *target = &map->inputs[PW_GAME_MAP_L2 + t];
+        if (!(map->seen & (1ull << (MAP_SEEN_THRESHOLD + t)))) continue;
+        if (target->kind == PW_GAME_MAP_DEFAULT || target->kind == PW_GAME_MAP_NONE ||
+            (target->kind == PW_GAME_MAP_PAD && (target->code == PW_GAME_PAD_LT || target->code == PW_GAME_PAD_RT)))
+            return PW_ERR_MALFORMED;
+    }
+    for (size_t s = 0; s < PW_GAME_MAP_STICKS; s++) {
+        PwGameMapStick *stick = &map->stick[s];
+        uint32_t lines = (uint32_t)(map->seen >> (MAP_SEEN_TUNING + s * TUNE_COUNT)) & ((1u << TUNE_COUNT) - 1u);
+        int pad, keyed;
+
+        if (stick->mode == PW_GAME_STICK_MODE_DEFAULT)
+            stick->mode = s ? PW_GAME_STICK_MODE_PAD_RIGHT : PW_GAME_STICK_MODE_PAD_LEFT;
+        if (lines & ~(uint32_t)takes[stick->mode]) return PW_ERR_MALFORMED;
+        pad = stick->mode == PW_GAME_STICK_MODE_PAD_LEFT || stick->mode == PW_GAME_STICK_MODE_PAD_RIGHT;
+        keyed = stick->mode == PW_GAME_STICK_MODE_DPAD || stick->mode == PW_GAME_STICK_MODE_KEYS;
+        if (stick->mode == PW_GAME_STICK_MODE_KEYS && !(lines & (1u << TUNE_KEYS))) return PW_ERR_MALFORMED;
+        if (!(lines & (1u << TUNE_DEADZONE))) stick->deadzone = pad ? 0 : keyed ? 40 : 16;
+        if (keyed && stick->deadzone < 10) return PW_ERR_MALFORMED;
+        if (!(lines & (1u << TUNE_CURVE))) stick->curve = pad ? PW_GAME_CURVE_LINEAR : PW_GAME_CURVE_SQUARED;
+        if (!(lines & (1u << TUNE_SPEED)))
+            stick->speed = stick->mode == PW_GAME_STICK_MODE_MOUSE ? PW_GAME_MOUSE_SPEED_DEFAULT :
+                           stick->mode == PW_GAME_STICK_MODE_WHEEL ? 10 : 0;
+        if (stick->mode == PW_GAME_STICK_MODE_WHEEL && stick->speed > 100) return PW_ERR_MALFORMED;
+        if ((uint32_t)stick->deadzone + stick->outer > 90) return PW_ERR_MALFORMED;
+        if (stick->mode == PW_GAME_STICK_MODE_NONE) memset(stick->keys, 0, sizeof(stick->keys));
+    }
+    return PW_OK;
+}
+
+PwGameMapTarget pw_game_map_target(const PwGameMap *map, size_t input, PwGameInputMode mode)
+{
+    static const uint8_t own[PW_GAME_MAP_INPUTS] = {
+        PW_GAME_PAD_A, PW_GAME_PAD_B, PW_GAME_PAD_X, PW_GAME_PAD_Y, PW_GAME_PAD_LB, PW_GAME_PAD_RB,
+        PW_GAME_PAD_LT, PW_GAME_PAD_RT, PW_GAME_PAD_LS, PW_GAME_PAD_RS, PW_GAME_PAD_DPAD_UP,
+        PW_GAME_PAD_DPAD_DOWN, PW_GAME_PAD_DPAD_LEFT, PW_GAME_PAD_DPAD_RIGHT, PW_GAME_PAD_START,
+        PW_GAME_PAD_BACK, PW_GAME_PAD_BACK, PW_GAME_PAD_GUIDE,
+    };
+    PwGameMapTarget target = { PW_GAME_MAP_NONE, 0, 0, { 0 } };
+
+    if (!map || input >= PW_GAME_MAP_INPUTS) return target;
+    if (map->inputs[input].kind != PW_GAME_MAP_DEFAULT) return map->inputs[input];
+    target.kind = PW_GAME_MAP_PAD;
+    target.code = own[input];
+    /* the touchpad's halves are its click on a DualShock 4 */
+    if (mode == PW_GAME_INPUT_PLAYSTATION &&
+        (input == PW_GAME_MAP_TOUCHPAD_LEFT || input == PW_GAME_MAP_TOUCHPAD_RIGHT))
+        target.code = PW_GAME_PAD_TOUCHPAD;
+    return target;
+}
+
 static int input_field(PwGameInput *input, const uint8_t *key, size_t key_length,
                        const uint8_t *v, size_t n, int allow_preset)
 {
+    /* map = 1: in the profile's own [input], before any button line,
+     * preset, mouse or mouse_speed (docs/INPUT_MAP.md). */
+    if (same(key, key_length, "map")) {
+        int bound = 0;
+        for (size_t i = 0; i < PW_GAME_BUTTON_COUNT; i++) bound |= input->bindings[i].kind != PW_GAME_BIND_UNSET;
+        if (!allow_preset || input->map.on || bound || (input->set & (SET_PRESET | SET_MOUSE | SET_SPEED)) ||
+            !same(v, n, "1"))
+            return PW_ERR_MALFORMED;
+        input->map.on = 1;
+        input->map.seen |= 1ull << MAP_SEEN_ON;
+        return PW_OK;
+    }
+    if (input->map.on) {
+        if (is(key, key_length, "preset") || is(key, key_length, "mouse") || is(key, key_length, "mouse_speed"))
+            return PW_ERR_MALFORMED;
+        if (!is(key, key_length, "mode") && !is(key, key_length, "rumble") && !is(key, key_length, "player2"))
+            return map_field(&input->map, key, key_length, v, n);
+    }
     if (is(key, key_length, "preset")) {
         if (!allow_preset || (input->set & SET_PRESET)) return PW_ERR_MALFORMED;
         if (preset_name(input->preset, sizeof(input->preset), v, n) != PW_OK) return PW_ERR_MALFORMED;
@@ -865,6 +1216,7 @@ int pw_game_profile_parse(const uint8_t *bytes, size_t length, PwGameProfile *pr
         return status;
     if ((status = pw_app_profile_parse(bytes, application_end, &parsed.app)) != PW_OK)
         return status;
+    if (parsed.input.map.on && (status = map_finish(&parsed.input.map)) != PW_OK) return status;
     /* show_fps and menu set the HUD variable themselves (pw_game_graphics_env). */
     for (size_t i = 0; (parsed.display.show_fps || parsed.display.menu) && i < parsed.debug_env_count; i++)
         if (!strcmp(parsed.debug_env[i].name, "DXVK_HUD") || !strcmp(parsed.debug_env[i].name, "GALLIUM_HUD"))
@@ -909,6 +1261,7 @@ void pw_game_input_overlay(PwGameInput *base, const PwGameInput *overrides)
     base->set |= overrides->set & (SET_MODE | SET_MOUSE | SET_SPEED | SET_RUMBLE);
     for (size_t i = 0; i < PW_GAME_BUTTON_COUNT; i++)
         if (overrides->bindings[i].kind != PW_GAME_BIND_UNSET) base->bindings[i] = overrides->bindings[i];
+    if (overrides->map.on) base->map = overrides->map;
 }
 
 void pw_game_input_default_mode(PwGameInput *input)
