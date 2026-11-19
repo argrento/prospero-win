@@ -231,18 +231,11 @@ int pw_wine_script_pad(PwWinePad *pad, int connected, const PwScriptPad *script,
     return 1;
 }
 
-/* Signed 1/65536-pixel travel of one axis. */
+/* Signed 1/65536-pixel travel of one axis, on the input map's own curve. */
 static int64_t travel(uint8_t stick, uint32_t speed, uint32_t elapsed_us)
 {
-    int32_t axis = (int32_t)stick - 0x80, magnitude = axis < 0 ? -axis : axis;
-    int64_t t, v;
-
-    if (magnitude <= PW_WINE_POINTER_DEADZONE) return 0;
-    t = (int64_t)(magnitude - PW_WINE_POINTER_DEADZONE) * 65536 / (127 - PW_WINE_POINTER_DEADZONE);
-    if (t > 65536) t = 65536;
-    v = t * t >> 16;                       /* 0..65536: a squared curve */
-    v = v * speed * elapsed_us / 1000000;   /* < 2^63 for speed <= 20000 */
-    return axis < 0 ? -v : v;
+    return pw_input_map_travel((int32_t)stick - 0x80, PW_WINE_POINTER_DEADZONE, 0, PW_GAME_CURVE_SQUARED, speed,
+                               elapsed_us);
 }
 
 int pw_wine_pointer_step(PwWinePointer *pointer, uint8_t stick_x, uint8_t stick_y,
@@ -261,4 +254,68 @@ int pw_wine_pointer_step(PwWinePointer *pointer, uint8_t stick_x, uint8_t stick_
     pointer->y -= dy * 65536;
     *out = (PwWineInput){ PW_WINE_INPUT_MOUSE_MOVE, 0, (int32_t)dx, (int32_t)dy, 0 };
     return 1;
+}
+
+static void map_sample(const PwPadPs5 *pad, PwInputMapSample *sample)
+{
+    memset(sample, 0, sizeof(*sample));
+    if (!pad) return;
+    sample->held = pad->core.previous_buttons;
+    sample->pressed = pad->core.pressed_edges;
+    sample->released = pad->core.released_edges;
+    sample->lx = pad->left_stick.x;
+    sample->ly = pad->left_stick.y;
+    sample->rx = pad->right_stick.x;
+    sample->ry = pad->right_stick.y;
+    sample->l2 = pad->l2;
+    sample->r2 = pad->r2;
+    sample->touch_left = pad->touch_left != 0;
+    sample->touch_fingers = pad->touch_fingers;
+    sample->active = pad->core.connected && !pad->intercepted;
+}
+
+static size_t map_events(const PwInputMapEvent *events, size_t count, PwWineInput *out)
+{
+    for (size_t i = 0; i < count; i++)
+        out[i] = (PwWineInput){ events[i].type, events[i].code, events[i].x, events[i].y, events[i].down };
+    return count;
+}
+
+size_t pw_wine_input_map(PwInputMapState *state, const PwGameInput *input, const PwPadPs5 *seen,
+                         uint32_t tick_us, PwPadPs5 *mapped, PwWineInput *out, size_t max)
+{
+    PwInputMapEvent events[PW_INPUT_MAP_EVENT_MAX];
+    PwInputMapSample sample;
+    PwInputMapPad pad;
+    size_t count;
+
+    if (!state || !input || !seen || !mapped || !out) return 0;
+    map_sample(seen, &sample);
+    count = pw_input_map_tick(state, &input->map, input->mode, &sample, tick_us, &pad, events,
+                              max < PW_INPUT_MAP_EVENT_MAX ? max : PW_INPUT_MAP_EVENT_MAX);
+    *mapped = *seen;
+    mapped->core.previous_buttons = pad.buttons;
+    mapped->core.pressed_edges = mapped->core.released_edges = 0;
+    mapped->touch_left = (unsigned)pad.touch_left;
+    mapped->left_stick.x = pad.lx;
+    mapped->left_stick.y = pad.ly;
+    mapped->right_stick.x = pad.rx;
+    mapped->right_stick.y = pad.ry;
+    mapped->l2 = pad.l2;
+    mapped->r2 = pad.r2;
+    return map_events(events, count, out);
+}
+
+size_t pw_wine_input_map_release(PwInputMapState *state, const PwGameInput *input, const PwPadPs5 *pad,
+                                 PwWineInput *out, size_t max)
+{
+    PwInputMapEvent events[PW_INPUT_MAP_EVENT_MAX];
+    PwInputMapSample sample;
+    size_t count;
+
+    if (!state || !input || !out) return 0;
+    map_sample(pad, &sample);
+    count = pw_input_map_release(state, &input->map, input->mode, pad ? &sample : NULL, events,
+                                 max < PW_INPUT_MAP_EVENT_MAX ? max : PW_INPUT_MAP_EVENT_MAX);
+    return map_events(events, count, out);
 }

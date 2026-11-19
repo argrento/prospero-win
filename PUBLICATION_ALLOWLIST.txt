@@ -80,6 +80,8 @@ src/pw_pad.c
 src/pw_pad.h
 src/pw_game_menu.c
 src/pw_game_menu.h
+src/pw_input_map.c
+src/pw_input_map.h
 src/pw_input_switch.c
 src/pw_input_switch.h
 src/pw_invite_prompt.c
@@ -94,6 +96,7 @@ tests/test_pw_audio_mix.c
 tests/test_pw_app_profile.c
 tests/test_pw_pad.c
 tests/test_pw_game_menu.c
+tests/test_pw_input_map.c
 tests/test_pw_input_switch.c
 tests/test_pw_invite_prompt.c
 tests/test_pw_pad_players.c

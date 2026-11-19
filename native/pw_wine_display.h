@@ -18,6 +18,7 @@
 #include <stdint.h>
 #include "../src/pw_present.h"
 #include "../src/pw_game_profile.h"
+#include "../src/pw_input_map.h"
 #include "../src/pw_script_input.h"
 #include "../wine/ps5/pw_wine_sink.h"
 #include "pw_pad_ps5.h"
@@ -124,4 +125,16 @@ enum { PW_WINE_POINTER_DEADZONE = 20 };   /* of 128, stick noise at rest */
  * else 0. */
 int pw_wine_pointer_step(PwWinePointer *pointer, uint8_t stick_x, uint8_t stick_y,
                          uint32_t speed, uint32_t elapsed_us, PwWineInput *out);
+/* The input map (src/pw_input_map.h) on the pad as the game should see it
+ * (seen: the menu, the keyboard and the touchpad hold have had it): mapped
+ * is seen with the controller the map sends in place of its buttons, sticks
+ * and triggers, ready for pw_wine_game_pad or pw_wine_game_pad_playstation
+ * (the finger on the touchpad stays); out gets the keys, mouse buttons,
+ * motion and wheel, room for PW_INPUT_MAP_EVENT_MAX. Returns how many. */
+size_t pw_wine_input_map(PwInputMapState *state, const PwGameInput *input, const PwPadPs5 *seen,
+                         uint32_t tick_us, PwPadPs5 *mapped, PwWineInput *out, size_t max);
+/* What the map holds, let go (pw_input_map_release); pad, the real one, is
+ * what stays away from the game until let go, NULL for nothing. */
+size_t pw_wine_input_map_release(PwInputMapState *state, const PwGameInput *input, const PwPadPs5 *pad,
+                                 PwWineInput *out, size_t max);
 #endif
