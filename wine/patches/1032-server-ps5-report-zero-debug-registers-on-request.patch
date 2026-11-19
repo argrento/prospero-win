@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Fri, 20 Nov 2026 01:00:00 +0100
+Subject: [PATCH] server: Report zero debug registers on request on PS5.
+
+The server reads a thread's debug registers with ptrace on Linux and the
+BSDs and with thread_get_state on macOS. On the PS5 it builds the empty
+fallback, which writes nothing and leaves the flag clear. GetThreadContext
+with CONTEXT_DEBUG_REGISTERS then succeeds without writing Dr0..Dr7, so the
+caller reads whatever its CONTEXT held before. A host that can read them
+returns zeros when no breakpoint is set, and Wine's Linux path does the
+same before any debug register was set.
+
+Some protected games call GetThreadContext on their own thread at start and
+test Dr0..Dr3 for zero. With PW_DEBUG_REGISTERS_ZERO=1 the fallback reports
+all debug registers as zero, with the flag set.
+---
+ server/ptrace.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/server/ptrace.c b/server/ptrace.c
+--- a/server/ptrace.c
++++ b/server/ptrace.c
+@@ -24,6 +24,8 @@
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
+ #include <signal.h>
+ #include <stdarg.h>
+ #include <sys/types.h>
+@@ -840,11 +842,27 @@
+ /* initialize registers in new thread if necessary */
+ void init_thread_context( struct thread *thread )
+ {
++}
++
++/* PW_DEBUG_REGISTERS_ZERO=1: report the debug registers as all zero, as a host that can read
++ * them does when no breakpoint is set, instead of leaving the caller's CONTEXT fields unwritten */
++static int debug_registers_zero(void)
++{
++    static int value = -1;
++    if (value == -1)
++    {
++        const char *env = getenv( "PW_DEBUG_REGISTERS_ZERO" );
++        value = env && env[0] == '1' && !env[1];
++    }
++    return value;
+ }
+ 
+ /* retrieve the thread x86 registers */
+ void get_thread_context( struct thread *thread, struct context_data *context, unsigned int flags )
+ {
++    if (!(flags & SERVER_CTX_DEBUG_REGISTERS) || !debug_registers_zero()) return;
++    memset( &context->debug, 0, sizeof(context->debug) );
++    context->flags |= SERVER_CTX_DEBUG_REGISTERS;
+ }
+ 
+ /* set the thread x86 debug registers */
+-- 
+2.43.0
