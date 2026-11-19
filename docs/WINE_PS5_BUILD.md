@@ -914,8 +914,14 @@ game (PE) -> DXVK d3d11/dxgi/d3d9/d3d8/d3d10core (PE, beside the game) -> winevu
 - **One display.** VideoOut has one display, so one swapchain presents at a
   time. A new swapchain replaces the current one through `oldSwapchain`, or
   takes the display from one that has never presented; a swapchain that has
-  presented keeps it until it is destroyed or replaced, and another window's
-  is refused (`VK_ERROR_NATIVE_WINDOW_IN_USE_KHR`). This matters for OpenGL
+  presented keeps it while it presents, and another window's is refused
+  (`VK_ERROR_NATIVE_WINDOW_IN_USE_KHR`). Once it has no flip queued and none
+  for 150 ms (PS5_Mesa `9db3f34`), the next swapchain made takes the display
+  and the idle one is out of date. Unity games at their first start present
+  once on a first swapchain and switch to fullscreen on a second one made a
+  few milliseconds later, keeping the first alive; before `9db3f34` the second
+  was refused for as long as the game ran and the screen kept the title's
+  loading spinner. This matters for OpenGL
   games under Zink that load wined3d: `hl.exe` (Half-Life, Counter-Strike)
   reads OpenGL's caps from a context on a hidden 10x10 window, Zink makes a
   swapchain on it and never presents, and before PS5_Mesa `f2ee389`
