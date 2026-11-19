@@ -10,7 +10,8 @@
  * thread and a slow flip never stalls Wine. The same thread reads the pad and
  * turns it into Wine input with the game profile's bindings: buttons send
  * keys or mouse buttons, and a stick can move the pointer. In xinput mode it
- * also becomes the game's XInput controller (the sink's gamepad slot).
+ * also becomes the game's XInput controller (the sink's gamepad slot),
+ * without the buttons bound to keys or mouse buttons.
  */
 #include <pthread.h>
 #include <stddef.h>
@@ -51,6 +52,18 @@ int pw_wine_frame_box_take(PwWineFrameBox *box, uint64_t *seen, uint8_t *out,
  * most max). */
 size_t pw_wine_game_inputs(const PwGameInput *input, uint32_t pressed, uint32_t released,
                            PwWineInput *out, size_t max);
+
+/* The DualSense buttons a profile binds to a key or a mouse button (none
+ * and unset are not bound). */
+uint32_t pw_wine_bound_buttons(const PwGameInput *input);
+
+/* The pad as the game's controller has it under a profile's bindings: a
+ * copy of pad in out without the bound buttons, held or in an edge, and
+ * with a bound L2 or R2's analog trigger at rest. A bound button sends
+ * only its key or mouse button (pw_wine_game_inputs), not the controller's
+ * button as well. A bound touchpad is its click only: the finger on it
+ * stays. */
+void pw_wine_pad_unbound(const PwPadPs5 *pad, const PwGameInput *input, PwPadPs5 *out);
 
 /* The DualSense as an XInput gamepad: its held buttons (Cross A, Circle B,
  * Square X, Triangle Y, L1/R1 shoulders, L3/R3 thumbs, Options Start,

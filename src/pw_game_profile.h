@@ -48,6 +48,9 @@
  *                          ; game, 0 (off) to 100 (the default)
  *   cross = space          ; <button> = <key> | mouse_left | mouse_right |
  *   r2 = mouse_left        ;            mouse_middle | vk:0xNN | none
+ *                          ; in xinput or playstation mode a button
+ *                          ; bound to a key or a mouse button sends
+ *                          ; only that, not the controller's button
  *   player2 = pinball-p2   ; a keyboard preset for a second DualSense, the pad
  *                          ; of another signed-in user (local multiplayer)
  *

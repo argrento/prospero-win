@@ -95,6 +95,32 @@ size_t pw_wine_game_inputs(const PwGameInput *input, uint32_t pressed, uint32_t 
     return add_edges(input, pressed, 1, out, used, max);
 }
 
+uint32_t pw_wine_bound_buttons(const PwGameInput *input)
+{
+    uint32_t bound = 0;
+
+    if (!input) return 0;
+    for (size_t i = 0; i < PW_GAME_BUTTON_COUNT; i++)
+        if (input->bindings[i].kind == PW_GAME_BIND_KEY || input->bindings[i].kind == PW_GAME_BIND_MOUSE)
+            bound |= input->bindings[i].mask;
+    return bound;
+}
+
+void pw_wine_pad_unbound(const PwPadPs5 *pad, const PwGameInput *input, PwPadPs5 *out)
+{
+    uint32_t bound;
+
+    if (!pad || !out) return;
+    *out = *pad;
+    bound = pw_wine_bound_buttons(input);
+    out->core.previous_buttons &= ~bound;
+    out->core.pressed_edges &= ~bound;
+    out->core.released_edges &= ~bound;
+    /* L2 and R2 reach the controller as their analog triggers. */
+    if (bound & 0x100u) out->l2 = 0;
+    if (bound & 0x200u) out->r2 = 0;
+}
+
 static const struct { uint32_t dualsense; uint16_t xinput; } pad_buttons[] = {
     { 0x4000u, 0x1000u }, { 0x2000u, 0x2000u }, { 0x8000u, 0x4000u }, { 0x1000u, 0x8000u },
     { 0x400u, 0x0100u }, { 0x800u, 0x0200u }, { 0x2u, 0x0040u }, { 0x4u, 0x0080u },

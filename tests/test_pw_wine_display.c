@@ -318,6 +318,88 @@ static void test_game_pad_playstation(void)
     assert(!extra.buttons && !extra.touching);
 }
 
+/* A button bound to a key or a mouse button sends only that: the game's
+ * controller doesn't have it as well. none and unbound buttons stay. */
+static void test_pad_unbound(void)
+{
+    static const char touch_text[] = "[input]\nmode = playstation\ntouchpad = mouse_left\ncreate = escape\n";
+    PwGameInput input, touch;
+    PwPadPs5 pad, unbound;
+    PwWinePad xinput;
+    PwWinePadExtra extra;
+
+    pw_game_input_init(&input);
+    assert(pw_game_input_parse((const uint8_t *)preset_text, sizeof(preset_text) - 1, &input) == PW_OK);
+    assert(pw_wine_bound_buttons(&input) == (L1 | R1 | CROSS | L2 | R2));
+    assert(pw_wine_bound_buttons(NULL) == 0);
+
+    memset(&pad, 0, sizeof(pad));
+    pad.core.connected = 1;
+    pad.left_stick = pad.right_stick = (PwPadPs5Stick){ 0x80, 0x80 };
+    pad.core.previous_buttons = CROSS | CIRCLE | SQUARE | L1 | R1 | L2 | R2;
+    pad.core.pressed_edges = CROSS | CIRCLE;
+    pad.core.released_edges = L1 | SQUARE;
+    pad.l2 = 200;
+    pad.r2 = 255;
+    pad.right_stick.x = 0xff;
+    pw_wine_pad_unbound(&pad, &input, &unbound);
+    assert(unbound.core.previous_buttons == (CIRCLE | SQUARE));
+    assert(unbound.core.pressed_edges == CIRCLE && unbound.core.released_edges == SQUARE);
+    assert(unbound.l2 == 0 && unbound.r2 == 0 && unbound.right_stick.x == 0xff && unbound.core.connected);
+    /* the pad itself is untouched: its edges still send the keys */
+    assert(pad.core.previous_buttons == (CROSS | CIRCLE | SQUARE | L1 | R1 | L2 | R2) && pad.l2 == 200);
+    /* Cross sends Space, not A as well; Circle (unbound) is B, Square (none) X. */
+    assert(pw_wine_game_pad(&unbound, &xinput) == 1);
+    assert(xinput.buttons == (0x2000u | 0x4000u) && !xinput.left_trigger && !xinput.right_trigger);
+    assert(xinput.thumb_rx == 32767);
+    assert(pw_wine_game_pad_playstation(&unbound, &xinput, &extra) == 1);
+    assert(xinput.buttons == (0x2000u | 0x4000u) && !xinput.left_trigger && !xinput.right_trigger);
+
+    /* Only the bound trigger rests: R2 alone bound, L2 keeps its travel. */
+    static const char r2_text[] = "[input]\nmode = xinput\nr2 = mouse_left\n";
+    PwGameInput r2_only;
+    pw_game_input_init(&r2_only);
+    assert(pw_game_input_parse((const uint8_t *)r2_text, sizeof(r2_text) - 1, &r2_only) == PW_OK);
+    pw_wine_pad_unbound(&pad, &r2_only, &unbound);
+    assert(unbound.l2 == 200 && unbound.r2 == 0);
+    assert(unbound.core.previous_buttons == (CROSS | CIRCLE | SQUARE | L1 | R1 | L2));
+    assert(pw_wine_game_pad(&unbound, &xinput) == 1 && xinput.left_trigger == 200 && !xinput.right_trigger);
+
+    /* With nothing bound the pad is the controller as it was. */
+    pw_game_input_init(&touch);
+    for (int none = 0; none < 2; none++) {
+        pw_wine_pad_unbound(&pad, none ? NULL : &touch, &unbound);
+        assert(unbound.core.previous_buttons == pad.core.previous_buttons);
+        assert(unbound.core.pressed_edges == pad.core.pressed_edges);
+        assert(unbound.core.released_edges == pad.core.released_edges);
+        assert(unbound.l2 == 200 && unbound.r2 == 255 && unbound.right_stick.x == 0xff);
+        assert(pw_wine_game_pad(&unbound, &xinput) == 1);
+        assert(xinput.buttons == (0x1000u | 0x2000u | 0x4000u | 0x0100u | 0x0200u));
+        assert(xinput.left_trigger == 200 && xinput.right_trigger == 255);
+    }
+
+    /* A bound touchpad is neither Back nor Guide, nor the DualShock 4's
+     * click, and a bound Create is neither Back nor Share; the finger on
+     * the touchpad stays. */
+    assert(pw_game_input_parse((const uint8_t *)touch_text, sizeof(touch_text) - 1, &touch) == PW_OK);
+    pad.core.previous_buttons = 0x100000u | 0x1u | CROSS;
+    pad.core.pressed_edges = pad.core.released_edges = 0;
+    pad.l2 = pad.r2 = 0;
+    pad.finger_down = 1;
+    pad.finger_x = 300;
+    pad.finger_y = 400;
+    for (int left = 0; left < 2; left++) {
+        pad.touch_left = (unsigned)left;
+        pw_wine_pad_unbound(&pad, &touch, &unbound);
+        assert(pw_wine_game_pad(&unbound, &xinput) == 1 && xinput.buttons == 0x1000u);
+    }
+    assert(pw_wine_game_pad_playstation(&unbound, &xinput, &extra) == 1 && xinput.buttons == 0x1000u);
+    assert(!extra.buttons && extra.touching && extra.touch_x == 300 && extra.touch_y == 400);
+
+    pw_wine_pad_unbound(NULL, &input, &unbound);   /* nothing to copy, no crash */
+    pw_wine_pad_unbound(&pad, &input, NULL);
+}
+
 /* Controller 0 is there, idle, until the title's controller first comes;
  * then it is the controller, and goes when it goes. */
 static void test_pad_until_first(void)
@@ -455,10 +537,11 @@ int main(void)
     test_pad();
     test_rumble_level();
     test_game_pad_playstation();
+    test_pad_unbound();
     test_pad_until_first();
     test_script_pad();
     printf("wine display passed: frame box copy, newest frame, refusals, concurrent put/take, "
            "profile bindings to keys and mouse buttons, stick pointer, resized frames, "
-           "DualSense as XInput, scripted controller added to it\n");
+           "DualSense as XInput, bound buttons off the controller, scripted controller added to it\n");
     return 0;
 }

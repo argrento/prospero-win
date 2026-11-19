@@ -3145,15 +3145,39 @@ int main(int argc, char **argv)
             }
             seen = &game_pad;
         }
+        if (pad_read && switch_inputs) {
+            /* What the old preset holds down comes up, as does what was let go
+             * this tick, and the new one starts from the next press. Before
+             * controller 0 is fed, so that the controller and the keys
+             * follow the same preset on this tick. */
+            size_t count = pw_wine_game_inputs(&game_input, 0, game_pad.core.previous_buttons | game_pad.core.released_edges,
+                                               events, sizeof(events) / sizeof(events[0]) - 1);
+            PwGameInput swap = game_input;
+            const char *label = input_label;
+
+            for (size_t i = 0; i < count; i++) {
+                if (post_input(&events[i]) == 0) posted++;
+                else refused++;
+            }
+            game_input = other_input;
+            other_input = swap;
+            input_label = other_label;
+            other_label = label;
+            input_switch_notify(input_label);
+            game_pad.core.released_edges = 0;
+        }
         /* XInput controller 0: the DualSense, and in a script build the
          * macro's controller added to it, every frame, so a scripted press
          * stays down until its release. */
         if (set_pad) {
             PwWinePad state;
             PwWinePadExtra extra_state;
+            PwPadPs5 unbound;   /* without the buttons that send keys or mouse buttons */
+
+            if (pad_read) pw_wine_pad_unbound(seen, &game_input, &unbound);
             int connected = set_pad_extra ?
-                            pw_wine_game_pad_playstation(pad_read ? seen : NULL, &state, &extra_state) :
-                            pw_wine_game_pad(pad_read ? seen : NULL, &state), scripted = 0;
+                            pw_wine_game_pad_playstation(pad_read ? &unbound : NULL, &state, &extra_state) :
+                            pw_wine_game_pad(pad_read ? &unbound : NULL, &state), scripted = 0;
             /* Until it first comes, the title's controller is there, idle:
              * a game that looks for controllers only at its start (SDL)
              * would miss one bridged in later. */
@@ -3175,25 +3199,6 @@ int main(int argc, char **argv)
                 if (set_pad_extra) set_pad_extra(connected ? &extra_state : NULL);
                 set_pad(connected ? &state : NULL);
             }
-        }
-        if (pad_read && switch_inputs) {
-            /* What the old preset holds down comes up, as does what was let go
-             * this tick, and the new one starts from the next press. */
-            size_t count = pw_wine_game_inputs(&game_input, 0, game_pad.core.previous_buttons | game_pad.core.released_edges,
-                                               events, sizeof(events) / sizeof(events[0]) - 1);
-            PwGameInput swap = game_input;
-            const char *label = input_label;
-
-            for (size_t i = 0; i < count; i++) {
-                if (post_input(&events[i]) == 0) posted++;
-                else refused++;
-            }
-            game_input = other_input;
-            other_input = swap;
-            input_label = other_label;
-            other_label = label;
-            input_switch_notify(input_label);
-            game_pad.core.released_edges = 0;
         }
         /* Controllers 1..3, XInput or DualShock 4s: the other signed-in users'
          * DualSenses, each with its own rumble, once the game has asked xinput for one
