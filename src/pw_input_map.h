@@ -24,6 +24,11 @@ enum { PW_INPUT_MAP_KEY = 1, PW_INPUT_MAP_MOUSE_MOVE, PW_INPUT_MAP_MOUSE_BUTTON,
 enum { PW_INPUT_MAP_EVENT_MAX = PW_GAME_MAP_INPUTS * 3 * PW_GAME_MAP_COMBO + 2 * 2 * 4 + 2 };
 /* Percent below a threshold or a dead zone at which it lets go again. */
 enum { PW_INPUT_MAP_HYSTERESIS = 5 };
+/* A stick or an analog trigger kept from the game after a release is let go
+ * once it is back at rest: a stick within this percent of its centre on
+ * each axis (or within its dead zone, when that is larger), a trigger at
+ * PW_INPUT_MAP_HYSTERESIS percent of a pull or less. */
+enum { PW_INPUT_MAP_STICK_REST = 16 };
 
 typedef struct PwInputMapEvent {
     uint32_t type;      /* PW_INPUT_MAP_* */
@@ -36,7 +41,12 @@ typedef struct PwInputMapEvent {
 typedef struct PwInputMapSample {
     uint32_t held, pressed, released;
     uint8_t lx, ly, rx, ry;     /* 0..255, 128 centred, y down */
-    uint8_t l2, r2;             /* 0..255 */
+    uint8_t l2, r2;             /* 0..255, the newest pull */
+    /* Every pull of the read, oldest first and ending with l2 and r2, for a
+     * trigger's threshold: one read can cross it and come back. NULL or a
+     * count of 0: only l2 and r2. */
+    const uint8_t *pulls[2];
+    size_t pull_count;
     int touch_left;             /* the held touchpad click began on the left half */
     unsigned touch_fingers;     /* fingers that made it: two is the console's keyboard */
     int active;                 /* connected and not taken by the system */
@@ -56,6 +66,12 @@ typedef struct PwInputMapState {
     uint32_t latched;           /* inputs kept from the game until let go */
     uint32_t trigger_on;        /* bit 0 l2, bit 1 r2: past the threshold */
     uint8_t dir_on[2], dir_latched[2];  /* per stick: 1 up, 2 down, 4 left, 8 right */
+    uint8_t stick_latched;      /* bit per stick: a controller, mouse or wheel stick kept until at rest */
+    uint8_t pull_latched;       /* bit 0 l2, bit 1 r2: an analog trigger kept until at rest */
+    /* how many inputs and stick directions hold each key down: a key goes
+     * up when the last of them lets go, so two combinations can share a
+     * modifier */
+    uint8_t key_holders[256];
     int64_t pointer_x, pointer_y, wheel;    /* not yet sent, in 1/65536 */
 } PwInputMapState;
 
@@ -70,7 +86,8 @@ size_t pw_input_map_tick(PwInputMapState *state, const PwGameMap *map, PwGameInp
 /* Let go of everything the map holds: keys and mouse buttons come up, and
  * what the pointer and wheel have left over is cleared. Every input still
  * held in sample (the real pad, may be NULL) stays away from the game until
- * it is let go. For a preset swap, a lost pad, and while the menu or the
+ * it is let go, and a stick off its centre or an analog trigger pulled
+ * until it is back at rest (PW_INPUT_MAP_STICK_REST). For a preset swap, a lost pad, and while the menu or the
  * console's keyboard has the pad. Returns the events written. */
 size_t pw_input_map_release(PwInputMapState *state, const PwGameMap *map, PwGameInputMode mode,
                             const PwInputMapSample *sample, PwInputMapEvent *out, size_t max);

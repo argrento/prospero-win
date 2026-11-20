@@ -360,6 +360,7 @@ wine/ps5/pw_vulkan_radv.c
 docs/INSTALLING_GAMES.md
 docs/GETTING_STARTED.md
 docs/CONTROLS.md
+docs/INPUT_MAP.md
 tests/test_pw_install.py
 tools/pw_gameplay_run.py
 tools/pw_cache_stats.py

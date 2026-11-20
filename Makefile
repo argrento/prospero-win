@@ -123,7 +123,7 @@ $(eval $(call test_rule,test_pw_launcher_render,tests/test_pw_launcher_render.c 
 $(eval $(call test_rule,test_pw_pad,tests/test_pw_pad.c src/pw_pad.c,))
 $(eval $(call test_rule,test_pw_game_menu,tests/test_pw_game_menu.c src/pw_game_menu.c,))
 $(eval $(call test_rule,test_pw_input_switch,tests/test_pw_input_switch.c src/pw_input_switch.c,))
-$(eval $(call test_rule,test_pw_input_map,tests/test_pw_input_map.c src/pw_input_map.c src/pw_game_profile.c src/pw_steam_view.c src/pw_app_profile.c native/pw_wine_display.c src/pw_script_input.c,-pthread))
+$(eval $(call test_rule,test_pw_input_map,tests/test_pw_input_map.c src/pw_input_map.c src/pw_osk.c src/pw_game_profile.c src/pw_steam_view.c src/pw_app_profile.c native/pw_wine_display.c src/pw_script_input.c,-pthread))
 $(eval $(call test_rule,test_pw_invite_prompt,tests/test_pw_invite_prompt.c src/pw_invite_prompt.c src/pw_game_menu.c,))
 $(eval $(call test_rule,test_pw_helper_notify,tests/test_pw_helper_notify.c src/pw_helper_notify.c,))
 $(eval $(call test_rule,test_pw_helper_channel,tests/test_pw_helper_channel.c src/pw_helper_channel.c,))

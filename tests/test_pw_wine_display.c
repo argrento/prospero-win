@@ -527,6 +527,71 @@ static void test_script_pad(void)
     }
 }
 
+/* A queue with room for a few events, as Wine's input queue when it is full. */
+static PwWineInput queued[16];
+static size_t queued_count, queue_room;
+static int post_into_queue(const PwWineInput *event)
+{
+    if (queued_count >= queue_room) return -1;
+    queued[queued_count++] = *event;
+    return 0;
+}
+
+/* A queue that Wine drains right after it refused one. */
+static int refusals;
+static int post_after_refusal(const PwWineInput *event)
+{
+    if (refusals) {
+        refusals--;
+        return -1;
+    }
+    return post_into_queue(event);
+}
+
+/* A release the full queue refuses is posted again before anything else,
+ * so a combination's modifier does not stay down in Wine. */
+static void test_backlog(void)
+{
+    PwWineBacklog backlog = { .count = 0 };
+    size_t refused;
+    const PwWineInput up[] = { { PW_WINE_INPUT_KEY, 'A', 0, 0, 0 }, { PW_WINE_INPUT_KEY, 0x11, 0, 0, 0 } };
+    const PwWineInput later[] = { { PW_WINE_INPUT_MOUSE_MOVE, 0, 3, 4, 0 }, { PW_WINE_INPUT_KEY, 0x11, 0, 0, 1 },
+                                  { PW_WINE_INPUT_KEY, 0x11, 0, 0, 0 }, { PW_WINE_INPUT_MOUSE_BUTTON, 1, 0, 0, 0 } };
+
+    /* one slot: A comes up, Ctrl waits */
+    queued_count = 0;
+    queue_room = 1;
+    assert(pw_wine_post_inputs(&backlog, up, 2, post_into_queue, &refused) == 1 && refused == 1);
+    assert(queued[0].code == 'A' && backlog.count == 1 && backlog.events[0].code == 0x11);
+    /* still full: the move and Ctrl's press are dropped, and nothing passes
+     * the waiting release; Ctrl's release is kept once, the button's too */
+    queued_count = 0;
+    queue_room = 0;
+    assert(pw_wine_post_inputs(&backlog, later, 4, post_into_queue, &refused) == 0 && refused == 4);
+    assert(backlog.count == 2 && backlog.events[0].code == 0x11 && backlog.events[1].type == PW_WINE_INPUT_MOUSE_BUTTON);
+    /* room again: the waiting ones first, then what is new */
+    queue_room = 16;
+    assert(pw_wine_post_inputs(&backlog, up, 1, post_into_queue, &refused) == 3 && refused == 0);
+    assert(!backlog.count && queued_count == 3 && queued[0].code == 0x11 && !queued[0].down &&
+           queued[1].type == PW_WINE_INPUT_MOUSE_BUTTON && queued[2].code == 'A');
+    /* the queue drains between the refused retry and what is new: the new
+     * press must not overtake the release still waiting */
+    queued_count = 0;
+    queue_room = 1;
+    assert(pw_wine_post_inputs(&backlog, up, 2, post_into_queue, &refused) == 1 && backlog.count == 1);
+    queued_count = 0;
+    refusals = 1;
+    assert(pw_wine_post_inputs(&backlog, &later[1], 1, post_after_refusal, &refused) == 0 && refused == 1);
+    assert(!queued_count && backlog.count == 1 && backlog.events[0].code == 0x11 && !backlog.events[0].down);
+    assert(pw_wine_post_inputs(&backlog, NULL, 0, post_into_queue, &refused) == 1 && !backlog.count);
+    /* with nothing new it still tries the backlog */
+    queued_count = 0;
+    queue_room = 0;
+    assert(pw_wine_post_inputs(&backlog, up, 2, post_into_queue, &refused) == 0 && backlog.count == 2);
+    queue_room = 16;
+    assert(pw_wine_post_inputs(&backlog, NULL, 0, post_into_queue, &refused) == 2 && !backlog.count && refused == 0);
+}
+
 int main(void)
 {
     test_frames();
@@ -540,8 +605,10 @@ int main(void)
     test_pad_unbound();
     test_pad_until_first();
     test_script_pad();
+    test_backlog();
     printf("wine display passed: frame box copy, newest frame, refusals, concurrent put/take, "
            "profile bindings to keys and mouse buttons, stick pointer, resized frames, "
-           "DualSense as XInput, bound buttons off the controller, scripted controller added to it\n");
+           "DualSense as XInput, bound buttons off the controller, scripted controller added to it, "
+           "refused releases posted again\n");
     return 0;
 }

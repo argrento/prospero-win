@@ -61,10 +61,25 @@ int main(void)
     fixture_count=1;assert(pw_pad_ps5_read(&pad)==PW_OK);
     assert(pad.left_stick.x==10 && pad.left_stick.y==250 && pad.right_stick.x==200 &&
            pad.right_stick.y==40 && pad.l2==30 && pad.r2==255);
+    /* Every pull of a read is kept, oldest first: a trigger's threshold can be
+     * crossed and left within one read. */
+    assert(pad.pull_count==1 && pad.pulls[0][0]==30 && pad.pulls[1][0]==255);
+    fixture[1]=fixture[0];fixture[2]=fixture[0];
+    fixture[0].r2=80;fixture[1].r2=200;fixture[1].connected=0;fixture[2].r2=70;fixture[2].l2=5;
+    fixture_count=3;assert(pw_pad_ps5_read(&pad)==PW_OK && pad.r2==70);
+    assert(pad.pull_count==1 && pad.pulls[1][0]==70 && pad.pulls[0][0]==5);   /* a gone pad lets go */
+    fixture[1].connected=1;
+    fixture_count=3;assert(pw_pad_ps5_read(&pad)==PW_OK);
+    assert(pad.pull_count==3 && pad.pulls[1][0]==80 && pad.pulls[1][1]==200 && pad.pulls[1][2]==70 &&
+           pad.pulls[0][2]==5);
+    /* the next read's own; an empty read has only the newest */
+    fixture_count=0;assert(pw_pad_ps5_read(&pad)==PW_OK && pad.pull_count==1 && pad.pulls[1][0]==70);
+    fixture[0]=fixture[2];fixture[0].r2=255;fixture[0].l2=30;
+    fixture_count=1;assert(pw_pad_ps5_read(&pad)==PW_OK && pad.pull_count==1 && pad.pulls[1][0]==255);
     /* ... an empty read keeps them, an intercepted or disconnected one centres them. */
     fixture_count=0;assert(pw_pad_ps5_read(&pad)==PW_OK && pad.left_stick.x==10);
     fixture[0].buttons=0x80000000u|CREATE;fixture_count=1;
-    assert(pw_pad_ps5_read(&pad)==PW_OK && pad.left_stick.x==0x80 && !pad.r2);
+    assert(pw_pad_ps5_read(&pad)==PW_OK && pad.left_stick.x==0x80 && !pad.r2 && !pad.pull_count);
     fixture[0]=(PwPadPs5Data){.left_stick={1,1},.connected=1,.timestamp=3200,.connected_count=1};
     assert(pw_pad_ps5_read(&pad)==PW_OK && pad.left_stick.x==1);
     fixture[0].connected=0;assert(pw_pad_ps5_read(&pad)==PW_OK && pad.left_stick.x==0x80);

@@ -68,6 +68,10 @@ typedef struct PwPadPs5 {
     /* The newest connected sample's sticks (0..255, 0x80 centred) and
      * triggers; centred and released while disconnected or intercepted. */
     PwPadPs5Stick left_stick,right_stick;uint8_t l2,r2;
+    /* The last read's trigger pulls, oldest first, ending with l2 and r2:
+     * one read can hold a pull past a threshold and back. pull_count is 0
+     * when the triggers were last centred (and then l2 and r2 are 0). */
+    uint8_t pulls[2][PW_PAD_PS5_BATCH];unsigned pull_count;
     /* Where the held touchpad click began: touch_left when its finger was
      * on the left half, touch_x and touch_y that finger's position, kept
      * until the click is released, so sliding the finger does not change

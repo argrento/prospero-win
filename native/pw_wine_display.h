@@ -128,13 +128,33 @@ int pw_wine_pointer_step(PwWinePointer *pointer, uint8_t stick_x, uint8_t stick_
 /* The input map (src/pw_input_map.h) on the pad as the game should see it
  * (seen: the menu, the keyboard and the touchpad hold have had it): mapped
  * is seen with the controller the map sends in place of its buttons, sticks
- * and triggers, ready for pw_wine_game_pad or pw_wine_game_pad_playstation
- * (the finger on the touchpad stays); out gets the keys, mouse buttons,
- * motion and wheel, room for PW_INPUT_MAP_EVENT_MAX. Returns how many. */
+ * and triggers, ready for pw_wine_game_pad or, with dualshock set,
+ * pw_wine_game_pad_playstation (the finger on the touchpad stays); out gets
+ * the keys, mouse buttons, motion and wheel, room for
+ * PW_INPUT_MAP_EVENT_MAX. Returns how many. dualshock says the game's
+ * controller is a DualShock 4 whatever the map's mode (a [launcher] preset
+ * in playstation mode makes it one): it has no Guide, so a map in another
+ * mode sends Guide nowhere rather than as the touchpad's click. */
 size_t pw_wine_input_map(PwInputMapState *state, const PwGameInput *input, const PwPadPs5 *seen,
-                         uint32_t tick_us, PwPadPs5 *mapped, PwWineInput *out, size_t max);
+                         uint32_t tick_us, int dualshock, PwPadPs5 *mapped, PwWineInput *out, size_t max);
 /* What the map holds, let go (pw_input_map_release); pad, the real one, is
  * what stays away from the game until let go, NULL for nothing. */
 size_t pw_wine_input_map_release(PwInputMapState *state, const PwGameInput *input, const PwPadPs5 *pad,
                                  PwWineInput *out, size_t max);
+
+/* Releases Wine's input queue refused, to post again before anything else:
+ * a key or mouse button let go that never reaches Wine stays down there. */
+enum { PW_WINE_BACKLOG = 64 };
+typedef struct PwWineBacklog {
+    PwWineInput events[PW_WINE_BACKLOG];
+    size_t count;
+} PwWineBacklog;
+/* Post the backlog, then events, in order, through post (pw_wine_post_input).
+ * From the first refusal on nothing more is posted this call, so nothing
+ * overtakes a release still waiting: releases (a key or mouse button let
+ * go) join the backlog, once each, and the rest is dropped. Returns how many
+ * were posted; refused, when not NULL, gets how many of events were not
+ * (dropped, or kept back for later). */
+size_t pw_wine_post_inputs(PwWineBacklog *backlog, const PwWineInput *events, size_t count,
+                           int (*post)(const PwWineInput *), size_t *refused);
 #endif

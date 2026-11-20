@@ -40,6 +40,9 @@ right_stick_speed = 1500
 - `map = 1` comes before every input line and tuning line (below). An input
   line before it is read as an old-style line, and the profile is refused.
 - These keys keep their meaning with `map = 1`: `mode`, `rumble`, `player2`.
+  In a section with `map = 1` they are written as strictly as the map's own
+  lines (below), before `map = 1` as well as after it: `MODE = KEYBOARD` or
+  `rumble = 050` refuses the profile.
 - These keys are refused with `map = 1`: `preset`, `mouse`, `mouse_speed`.
   The stick lines replace `mouse` and `mouse_speed`.
 - An old-style button value (`cross = z`, `r2 = mouse_left`, `vk:0x41`
@@ -111,6 +114,15 @@ A button input takes one of these:
 A key combination is pressed in the order written and released in the
 opposite order. The wheel does not repeat while the button is held.
 
+When more than one input holds the same key (two combinations with `ctrl`,
+or a button and a stick direction on `w`), the key goes down with the first
+and comes up when the last of them is let go. A mouse button goes down and
+up with each input that sends it, as the old-style lines send it.
+
+A press of an input that the game still has down sends its release first:
+a button let go and pressed again between two reads of the controller is
+two presses.
+
 ### Controller buttons
 
 `mode` decides which controller the game has. The names are the same in
@@ -144,6 +156,10 @@ while any of them is held. A trigger gets the largest pull sent to it.
 
 In `playstation` mode a finger on the touchpad still reaches the DualShock 4's
 touchpad, as without the map.
+
+When the profile's `[launcher]` preset is in `playstation` mode, the game's
+controller is a DualShock 4 under every preset. A map in `xinput` mode then
+gives it the buttons it has: `pad:guide` sends nothing.
 
 ### Keys
 
@@ -192,7 +208,10 @@ button target. With a button target the trigger works as a button:
 
 With a threshold, the button goes down when the pull reaches the threshold
 (raw `threshold * 255 / 100`, rounded down) and comes up when it falls to
-5 points below it (raw `(threshold - 5) * 255 / 100`, rounded down, or less). Without the line, the button
+5 points below it (raw `(threshold - 5) * 255 / 100`, rounded down, or less).
+Every pull the controller reports counts, also when several come between two
+reads: a pull past the threshold and back within one read is a press and a
+release. Without the line, the button
 follows the DualSense's own L2 or R2 button, as an old-style `r2 = ...` line
 does. `<trigger>_threshold` is refused with `pad:lt`, `pad:rt` and `none`,
 and when the trigger has no line (its default is `pad:lt` or `pad:rt`).
@@ -299,7 +318,15 @@ Everything the map holds is let go when:
 
 Let go means: keys and mouse buttons come up, the controller reads idle, and
 the pointer and wheel remainders are cleared. An input still held when the
-menu or the keyboard closes stays away from the game until it is let go.
+menu or the keyboard closes stays away from the game until it is let go:
+
+- a button, until it comes up (or is pressed again);
+- a stick in `pad:dpad` or `keys`, each direction until it goes off;
+- a stick in `pad:*_stick`, `mouse` or `wheel`, until both its axes are back
+  within 16 % of the centre (`16 * 127 / 100`, 20 raw), or within its dead
+  zone when that is larger;
+- a trigger sending `pad:lt` or `pad:rt`, until its pull is 5 % or less
+  (`5 * 255 / 100`, 12 raw).
 
 ## Templates
 

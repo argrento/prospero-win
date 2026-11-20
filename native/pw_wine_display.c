@@ -269,6 +269,12 @@ static void map_sample(const PwPadPs5 *pad, PwInputMapSample *sample)
     sample->ry = pad->right_stick.y;
     sample->l2 = pad->l2;
     sample->r2 = pad->r2;
+    if (pad->pull_count && pad->pull_count <= PW_PAD_PS5_BATCH && pad->pulls[0][pad->pull_count - 1] == pad->l2 &&
+        pad->pulls[1][pad->pull_count - 1] == pad->r2) {
+        sample->pulls[0] = pad->pulls[0];
+        sample->pulls[1] = pad->pulls[1];
+        sample->pull_count = pad->pull_count;
+    }
     sample->touch_left = pad->touch_left != 0;
     sample->touch_fingers = pad->touch_fingers;
     sample->active = pad->core.connected && !pad->intercepted;
@@ -282,7 +288,7 @@ static size_t map_events(const PwInputMapEvent *events, size_t count, PwWineInpu
 }
 
 size_t pw_wine_input_map(PwInputMapState *state, const PwGameInput *input, const PwPadPs5 *seen,
-                         uint32_t tick_us, PwPadPs5 *mapped, PwWineInput *out, size_t max)
+                         uint32_t tick_us, int dualshock, PwPadPs5 *mapped, PwWineInput *out, size_t max)
 {
     PwInputMapEvent events[PW_INPUT_MAP_EVENT_MAX];
     PwInputMapSample sample;
@@ -294,6 +300,8 @@ size_t pw_wine_input_map(PwInputMapState *state, const PwGameInput *input, const
     count = pw_input_map_tick(state, &input->map, input->mode, &sample, tick_us, &pad, events,
                               max < PW_INPUT_MAP_EVENT_MAX ? max : PW_INPUT_MAP_EVENT_MAX);
     *mapped = *seen;
+    /* In xinput mode the touchpad's bit is Guide, which a DualShock 4 has not. */
+    if (dualshock && input->mode != PW_GAME_INPUT_PLAYSTATION) pad.buttons &= ~(uint32_t)PW_PAD_PS5_TOUCHPAD;
     mapped->core.previous_buttons = pad.buttons;
     mapped->core.pressed_edges = mapped->core.released_edges = 0;
     mapped->touch_left = (unsigned)pad.touch_left;
@@ -303,6 +311,7 @@ size_t pw_wine_input_map(PwInputMapState *state, const PwGameInput *input, const
     mapped->right_stick.y = pad.ry;
     mapped->l2 = pad.l2;
     mapped->r2 = pad.r2;
+    mapped->pull_count = 0;
     return map_events(events, count, out);
 }
 
@@ -318,4 +327,40 @@ size_t pw_wine_input_map_release(PwInputMapState *state, const PwGameInput *inpu
     count = pw_input_map_release(state, &input->map, input->mode, pad ? &sample : NULL, events,
                                  max < PW_INPUT_MAP_EVENT_MAX ? max : PW_INPUT_MAP_EVENT_MAX);
     return map_events(events, count, out);
+}
+
+static int is_release(const PwWineInput *event)
+{
+    return (event->type == PW_WINE_INPUT_KEY || event->type == PW_WINE_INPUT_MOUSE_BUTTON) && !event->down;
+}
+
+size_t pw_wine_post_inputs(PwWineBacklog *backlog, const PwWineInput *events, size_t count,
+                           int (*post)(const PwWineInput *), size_t *refused)
+{
+    size_t posted, sent = 0, dropped = 0, waiting;
+
+    if (!backlog || !post) return 0;
+    if (!events) count = 0;
+    while (sent < backlog->count && post(&backlog->events[sent]) == 0) sent++;
+    posted = sent;
+    memmove(backlog->events, backlog->events + sent, (backlog->count - sent) * sizeof(backlog->events[0]));
+    backlog->count -= sent;
+    waiting = backlog->count != 0;
+    for (size_t i = 0; i < count; i++) {
+        const PwWineInput *event = &events[i];
+        size_t k;
+
+        if (!waiting && post(event) == 0) {
+            posted++;
+            continue;
+        }
+        waiting = 1;
+        dropped++;
+        if (!is_release(event)) continue;
+        for (k = 0; k < backlog->count; k++)
+            if (backlog->events[k].type == event->type && backlog->events[k].code == event->code) break;
+        if (k == backlog->count && backlog->count < PW_WINE_BACKLOG) backlog->events[backlog->count++] = *event;
+    }
+    if (refused) *refused = dropped;
+    return posted;
 }

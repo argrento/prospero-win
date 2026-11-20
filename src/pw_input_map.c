@@ -33,13 +33,14 @@ static int64_t curved(int64_t t, int curve)
     return t;
 }
 
-/* A size past the dead zone, scaled to 0..65536 and curved. */
-static int64_t shaped(uint32_t size, uint32_t deadzone, uint32_t outer, int curve)
+/* A size past the dead zone, scaled to 0..65536 and curved. The size is in
+ * 1/256 units, the zones in whole ones. */
+static int64_t shaped(uint32_t size256, uint32_t deadzone, uint32_t outer, int curve)
 {
     int64_t t;
 
-    if (size <= deadzone) return 0;
-    t = (int64_t)(size - deadzone) * 65536 / (int64_t)(127 - outer - deadzone);
+    if (size256 <= deadzone * 256u) return 0;
+    t = (int64_t)(size256 - deadzone * 256u) * 65536 / ((int64_t)(127 - outer - deadzone) * 256);
     if (t > 65536) t = 65536;
     return curved(t, curve);
 }
@@ -51,16 +52,24 @@ int64_t pw_input_map_travel(int32_t axis, uint32_t deadzone, uint32_t outer, int
     int64_t v;
 
     if (deadzone + outer >= 127) return 0;
-    v = shaped(magnitude, deadzone, outer, curve);
+    v = shaped(magnitude * 256u, deadzone, outer, curve);
     v = v * speed * elapsed_us / 1000000;   /* < 2^63 for speed <= 20000 */
     return axis < 0 ? -v : v;
 }
 
+/* The integer square root of n, rounded down. */
 static uint32_t root(uint32_t n)
 {
     uint32_t r = 0;
 
-    while ((r + 1) * (r + 1) <= n) r++;
+    for (uint32_t bit = 1u << 30; bit; bit >>= 2) {
+        if (n >= r + bit) {
+            n -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+    }
     return r;
 }
 
@@ -77,14 +86,16 @@ static uint32_t raw(uint32_t percent) { return percent * 127u / 100u; }
 static void stick_to_pad(const PwGameMapStick *stick, int32_t *dx, int32_t *dy)
 {
     if (stick->deadzone || stick->outer || stick->curve != PW_GAME_CURVE_LINEAR) {
-        uint32_t size = root((uint32_t)(*dx * *dx + *dy * *dy));
-        int64_t length = shaped(size, raw(stick->deadzone), raw(stick->outer), stick->curve) * 127;
+        /* the distance in 1/256 units, so a dead zone is not widened by
+         * rounding it down: at most 2 * 128^2 << 16 = 2^31 */
+        uint32_t size256 = root((uint32_t)(*dx * *dx + *dy * *dy) << 16);
+        int64_t length = shaped(size256, raw(stick->deadzone), raw(stick->outer), stick->curve) * 127;
 
-        if (!size || !length) {
+        if (!size256 || !length) {
             *dx = *dy = 0;
         } else {
-            *dx = clamp_axis((int64_t)*dx * length / ((int64_t)size << 16));
-            *dy = clamp_axis((int64_t)*dy * length / ((int64_t)size << 16));
+            *dx = clamp_axis((int64_t)*dx * length / ((int64_t)size256 << 8));
+            *dy = clamp_axis((int64_t)*dy * length / ((int64_t)size256 << 8));
         }
     }
     if (stick->invert_x) *dx = clamp_axis(-(int64_t)*dx);
@@ -117,14 +128,27 @@ static size_t put(PwInputMapEvent *out, size_t used, size_t max, uint32_t type, 
     return used + 1;
 }
 
+/* One key held or let go by one more input: it goes down with the first
+ * that holds it and up with the last. */
+static size_t key(PwInputMapState *state, uint8_t vk, int down, PwInputMapEvent *out, size_t used, size_t max)
+{
+    if (down) {
+        if (state->key_holders[vk]++) return used;
+    } else {
+        if (!state->key_holders[vk] || --state->key_holders[vk]) return used;
+    }
+    return put(out, used, max, PW_INPUT_MAP_KEY, vk, 0, (uint32_t)down);
+}
+
 /* A key or mouse-button target's press (modifiers first) or release (in the
- * opposite order). Wheel notches come with a press only. */
-static size_t send(const PwGameMapTarget *target, int down, PwInputMapEvent *out, size_t used, size_t max)
+ * opposite order). Wheel notches come with a press only. A mouse button
+ * goes with each input, as the old bindings send it. */
+static size_t send(PwInputMapState *state, const PwGameMapTarget *target, int down, PwInputMapEvent *out,
+                   size_t used, size_t max)
 {
     if (target->kind == PW_GAME_MAP_KEYS) {
         for (size_t k = 0; k < target->count; k++)
-            used = put(out, used, max, PW_INPUT_MAP_KEY, target->keys[down ? k : target->count - 1 - k], 0,
-                       (uint32_t)down);
+            used = key(state, target->keys[down ? k : target->count - 1 - k], down, out, used, max);
     } else if (target->kind == PW_GAME_MAP_MOUSE) {
         if (target->code == PW_GAME_MOUSE_WHEEL_UP || target->code == PW_GAME_MOUSE_WHEEL_DOWN) {
             if (down)
@@ -181,12 +205,22 @@ static void edges(PwInputMapState *state, const PwGameMap *map, const PwInputMap
             p = p && touch && here;
         }
         if ((i == PW_GAME_MAP_L2 || i == PW_GAME_MAP_R2) && map->threshold[i - PW_GAME_MAP_L2]) {
+            /* every pull of the read in turn: one read can cross the
+             * threshold and come back, or the other way round */
             const size_t t = i - PW_GAME_MAP_L2;
-            const int was = (trigger_on >> t) & 1u;
-            int now = sample->active && trigger_past(t ? sample->r2 : sample->l2, map->threshold[t], was);
+            const uint8_t *pulls = sample->pull_count ? sample->pulls[t] : NULL;
+            const size_t count = pulls ? sample->pull_count : 1;
+            int now = (trigger_on >> t) & 1u;
+
+            p = r = 0;
+            for (size_t k = 0; k < count; k++) {
+                const int next = sample->active &&
+                                 trigger_past(pulls ? pulls[k] : t ? sample->r2 : sample->l2, map->threshold[t], now);
+                p |= next && !now;
+                r |= !next && now;
+                now = next;
+            }
             h = now;
-            p = now && !was;
-            r = !now && was;
             trigger_on = now ? trigger_on | (1u << t) : trigger_on & ~(1u << t);
         }
         if (!sample->active) h = p = 0;
@@ -203,6 +237,23 @@ static void stick_axes(const PwInputMapSample *sample, size_t s, int32_t *dx, in
     *dy = sample->active ? (int32_t)(s ? sample->ry : sample->ly) - 128 : 0;
 }
 
+/* A stick back near its centre, on each axis, as far as it lets go. */
+static int stick_at_rest(const PwGameMapStick *stick, int32_t dx, int32_t dy)
+{
+    const uint32_t rest = raw(stick->deadzone > PW_INPUT_MAP_STICK_REST ? stick->deadzone : PW_INPUT_MAP_STICK_REST);
+    return (uint32_t)(dx < 0 ? -dx : dx) <= rest && (uint32_t)(dy < 0 ? -dy : dy) <= rest;
+}
+
+/* A stick whose position reaches the game as it moves: a controller stick,
+ * the pointer or the wheel. */
+static int analog_stick(const PwGameMapStick *stick)
+{
+    return stick->mode == PW_GAME_STICK_MODE_PAD_LEFT || stick->mode == PW_GAME_STICK_MODE_PAD_RIGHT ||
+           stick->mode == PW_GAME_STICK_MODE_MOUSE || stick->mode == PW_GAME_STICK_MODE_WHEEL;
+}
+
+static int pull_at_rest(uint8_t pull) { return pull <= PW_INPUT_MAP_HYSTERESIS * 255u / 100u; }
+
 size_t pw_input_map_release(PwInputMapState *state, const PwGameMap *map, PwGameInputMode mode,
                             const PwInputMapSample *sample, PwInputMapEvent *out, size_t max)
 {
@@ -212,18 +263,19 @@ size_t pw_input_map_release(PwInputMapState *state, const PwGameMap *map, PwGame
     for (size_t i = 0; i < PW_GAME_MAP_INPUTS; i++) {
         PwGameMapTarget target = pw_game_map_target(map, i, mode);
         if (!(state->down & (1u << i))) continue;
-        used = send(&target, 0, out, used, max);
+        used = send(state, &target, 0, out, used, max);
     }
     for (size_t s = 0; s < PW_GAME_MAP_STICKS; s++) {
         const PwGameMapStick *stick = &map->stick[s];
         for (int d = 0; stick->mode == PW_GAME_STICK_MODE_KEYS && d < 4; d++)
             if ((state->dir_on[s] & (1u << d)) && stick->keys[d])
-                used = put(out, used, max, PW_INPUT_MAP_KEY, stick->keys[d], 0, 0);
+                used = key(state, stick->keys[d], 0, out, used, max);
         state->dir_latched[s] |= state->dir_on[s];
         state->dir_on[s] = 0;
     }
     state->latched |= state->down;
     state->down = 0;
+    memset(state->key_holders, 0, sizeof(state->key_holders));
     state->pointer_x = state->pointer_y = state->wheel = 0;
     if (sample && sample->active) {
         uint32_t held, pressed, released;
@@ -237,9 +289,16 @@ size_t pw_input_map_release(PwInputMapState *state, const PwGameMap *map, PwGame
         for (size_t s = 0; s < PW_GAME_MAP_STICKS; s++) {
             const PwGameMapStick *stick = &map->stick[s];
             int32_t dx, dy;
-            if (stick->mode != PW_GAME_STICK_MODE_KEYS && stick->mode != PW_GAME_STICK_MODE_DPAD) continue;
             stick_axes(sample, s, &dx, &dy);
-            state->dir_latched[s] |= stick_dirs(stick, dx, dy, 0xf);
+            if (stick->mode == PW_GAME_STICK_MODE_KEYS || stick->mode == PW_GAME_STICK_MODE_DPAD)
+                state->dir_latched[s] |= stick_dirs(stick, dx, dy, 0xf);
+            else if (analog_stick(stick) && !stick_at_rest(stick, dx, dy))
+                state->stick_latched |= (uint8_t)(1u << s);
+        }
+        for (size_t t = 0; t < 2; t++) {
+            PwGameMapTarget target = pw_game_map_target(map, PW_GAME_MAP_L2 + t, mode);
+            if (analog_trigger(&target, PW_GAME_MAP_L2 + t) && !pull_at_rest(t ? sample->r2 : sample->l2))
+                state->pull_latched |= (uint8_t)(1u << t);
         }
     }
     return used;
@@ -274,6 +333,11 @@ size_t pw_input_map_tick(PwInputMapState *state, const PwGameMap *map, PwGameInp
 
         stick_axes(sample, s, &dx, &dy);
         dirs[s] = 0;
+        /* kept from the game since a release until it is back at rest */
+        if (state->stick_latched & (1u << s)) {
+            if (!analog_stick(stick) || stick_at_rest(stick, dx, dy)) state->stick_latched &= (uint8_t)~(1u << s);
+            else continue;
+        }
         if (stick->mode == PW_GAME_STICK_MODE_KEYS || stick->mode == PW_GAME_STICK_MODE_DPAD) {
             uint8_t now = stick_dirs(stick, dx, dy, (uint8_t)(state->dir_on[s] | state->dir_latched[s]));
             state->dir_latched[s] &= now;
@@ -295,35 +359,37 @@ size_t pw_input_map_tick(PwInputMapState *state, const PwGameMap *map, PwGameInp
                                                 stick->curve, stick->speed, tick_us);
         }
     }
-    /* What comes up, buttons then stick keys; then what goes down. */
+    /* What comes up, buttons then stick keys; then what goes down. A press
+     * of an input that is down was let go first, whether or not the
+     * release came with it. */
     for (size_t i = 0; i < PW_GAME_MAP_INPUTS; i++) {
         const uint32_t me = 1u << i;
-        if ((state->down & me) && ((released & me) || !(held & me))) {
-            used = send(&targets[i], 0, out, used, max);
+        if ((state->down & me) && ((released & me) || (pressed & me) || !(held & me))) {
+            used = send(state, &targets[i], 0, out, used, max);
             state->down &= ~me;
         }
     }
     for (size_t s = 0; s < PW_GAME_MAP_STICKS; s++)
         for (int d = 0; map->stick[s].mode == PW_GAME_STICK_MODE_KEYS && d < 4; d++)
             if ((state->dir_on[s] & ~dirs[s] & (1u << d)) && map->stick[s].keys[d])
-                used = put(out, used, max, PW_INPUT_MAP_KEY, map->stick[s].keys[d], 0, 0);
+                used = key(state, map->stick[s].keys[d], 0, out, used, max);
     for (size_t i = 0; i < PW_GAME_MAP_INPUTS; i++) {
         const uint32_t me = 1u << i;
         if (!(pressed & me) || (state->down & me) || !sends_events(&targets[i]) || (state->latched & me)) continue;
-        used = send(&targets[i], 1, out, used, max);
+        used = send(state, &targets[i], 1, out, used, max);
         if (holds(&targets[i])) state->down |= me;
     }
     for (size_t s = 0; s < PW_GAME_MAP_STICKS; s++) {
         for (int d = 0; map->stick[s].mode == PW_GAME_STICK_MODE_KEYS && d < 4; d++)
             if ((dirs[s] & ~state->dir_on[s] & (1u << d)) && map->stick[s].keys[d])
-                used = put(out, used, max, PW_INPUT_MAP_KEY, map->stick[s].keys[d], 0, 1);
+                used = key(state, map->stick[s].keys[d], 1, out, used, max);
         state->dir_on[s] = dirs[s];
     }
     /* A press and its release in the same batch: it comes up again now. */
     for (size_t i = 0; i < PW_GAME_MAP_INPUTS; i++) {
         const uint32_t me = 1u << i;
         if ((state->down & me) && !(held & me)) {
-            used = send(&targets[i], 0, out, used, max);
+            used = send(state, &targets[i], 0, out, used, max);
             state->down &= ~me;
         }
     }
@@ -347,8 +413,14 @@ size_t pw_input_map_tick(PwInputMapState *state, const PwGameMap *map, PwGameInp
         const PwGameMapTarget *target = &targets[i];
         if (target->kind != PW_GAME_MAP_PAD) continue;
         if (analog_trigger(target, i)) {
+            const uint8_t bit = (uint8_t)(1u << (i - PW_GAME_MAP_L2));
             uint8_t pull = sample->active ? (i == PW_GAME_MAP_L2 ? sample->l2 : sample->r2) : 0;
             uint8_t *to = target->code == PW_GAME_PAD_LT ? &pad->l2 : &pad->r2;
+            /* kept from the game since a release until it is back at rest */
+            if (state->pull_latched & bit) {
+                if (pull_at_rest(pull)) state->pull_latched &= (uint8_t)~bit;
+                else pull = 0;
+            }
             if (pull > *to) *to = pull;
             continue;
         }

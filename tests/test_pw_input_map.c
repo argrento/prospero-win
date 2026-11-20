@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "../src/pw_input_map.h"
 #include "../native/pw_wine_display.h"
+#include "../src/pw_osk.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -282,6 +283,18 @@ static void test_sticks(void)
     s.lx = 0; s.ly = 0;                 /* a corner keeps its direction, at full reach */
     tick(&state, &shaped, &s, &pad, e);
     assert(pad.lx == 128 + 89 && pad.ly == 128 - 89);
+    /* The distance is not rounded down before the dead zone: at 90 % (114
+     * raw), (114, 15) is sqrt(13221) = 114.98 from the centre, 0.98 past it
+     * of 13, so 7.5 % of the way: 9.57 long, (9.49, 1.25) in its direction. */
+    PwGameInput wide = mapped_input("mode = xinput\nmap = 1\nleft_stick_deadzone = 90\n");
+    pw_input_map_init(&state);
+    s = sample(0, 0);
+    s.lx = 128 + 114; s.ly = 128 + 15;
+    tick(&state, &wide, &s, &pad, e);
+    assert(pad.lx == 128 + 9 && pad.ly == 128 + 1);
+    s.lx = 128 + 114; s.ly = 128;       /* on the dead zone itself: nothing */
+    tick(&state, &wide, &s, &pad, e);
+    assert(pad.lx == 128 && pad.ly == 128);
 }
 
 /* Letting go: a swap, the menu or the keyboard; what is still held stays
@@ -339,6 +352,187 @@ static void test_release(void)
     /* without a pad nothing is kept */
     pw_input_map_init(&state);
     assert(pw_input_map_release(&state, &input.map, input.mode, NULL, e, PW_INPUT_MAP_EVENT_MAX) == 0 && !state.latched);
+
+    /* Sticks and triggers that reach the game as they move are kept too:
+     * the controller reads idle, and the pointer and the wheel stay still,
+     * until each is back at rest. */
+    PwGameInput analog = mapped_input("mode = xinput\nmap = 1\nr2 = pad:rt\nl2 = pad:rt\n");
+    PwGameInput pointer = mapped_input("mode = keyboard\nmap = 1\nleft_stick = mouse\nright_stick = wheel\n");
+    pw_input_map_init(&state);
+    s = sample(R2, 0);
+    s.lx = 220;
+    s.r2 = 240;
+    tick(&state, &analog, &s, &pad, e);
+    assert(pad.lx == 220 && pad.r2 == 240);
+    assert(pw_input_map_release(&state, &analog.map, analog.mode, &s, e, PW_INPUT_MAP_EVENT_MAX) == 0);
+    s.pressed = 0;
+    tick(&state, &analog, &s, &pad, e);
+    assert(pad.lx == 128 && pad.r2 == 0);
+    s.lx = 128 + 21;   /* still past 16 % (20 raw) */
+    s.r2 = 13;         /* still past 5 % (12 raw) */
+    s.l2 = 30;         /* L2 was at rest: it is the game's */
+    tick(&state, &analog, &s, &pad, e);
+    assert(pad.lx == 128 && pad.r2 == 30);
+    s.lx = 128 + 20;
+    s.r2 = 12;
+    s.l2 = 0;
+    tick(&state, &analog, &s, &pad, e);
+    assert(pad.lx == 128 + 20 && pad.r2 == 12);
+    s.lx = 220;
+    s.r2 = 240;
+    tick(&state, &analog, &s, &pad, e);
+    assert(pad.lx == 220 && pad.r2 == 240);
+    pw_input_map_init(&state);
+    s = sample(0, 0);
+    s.lx = 255;
+    s.ry = 0;
+    assert(pw_input_map_release(&state, &pointer.map, pointer.mode, &s, e, PW_INPUT_MAP_EVENT_MAX) == 0);
+    for (int i = 0; i < 30; i++) assert(tick(&state, &pointer, &s, &pad, e) == 0);
+    s.lx = s.ry = 128;
+    assert(tick(&state, &pointer, &s, &pad, e) == 0);
+    s.lx = 255;
+    s.ry = 0;
+    size_t moved = 0;
+    for (int i = 0; i < 30; i++) moved += tick(&state, &pointer, &s, &pad, e);
+    assert(moved > 30);
+}
+
+/* Two combinations share a modifier: it stays down until the last lets go,
+ * and a stick's key shares its key with a button's. */
+static void test_shared_keys(void)
+{
+    PwGameInput input = mapped_input("mode = keyboard\nmap = 1\ncross = key:ctrl+s\ncircle = key:ctrl+d\n"
+                                     "square = key:w\nleft_stick = keys\nleft_stick_keys = w,s,a,d\n");
+    PwInputMapState state;
+    PwInputMapPad pad;
+    PwInputMapEvent e[PW_INPUT_MAP_EVENT_MAX];
+    PwInputMapSample s;
+
+    pw_input_map_init(&state);
+    s = sample(CROSS, 0);
+    assert(tick(&state, &input, &s, &pad, e) == 2 && is_key(&e[0], 0x11, 1) && is_key(&e[1], 'S', 1));
+    s = sample(CROSS | CIRCLE, CROSS);
+    assert(tick(&state, &input, &s, &pad, e) == 1 && is_key(&e[0], 'D', 1));
+    s = sample(CIRCLE, CROSS | CIRCLE);
+    assert(tick(&state, &input, &s, &pad, e) == 1 && is_key(&e[0], 'S', 0));
+    s = sample(0, CIRCLE);
+    assert(tick(&state, &input, &s, &pad, e) == 2 && is_key(&e[0], 'D', 0) && is_key(&e[1], 0x11, 0));
+    /* square and the stick's up both hold W */
+    s = sample(SQUARE, 0);
+    assert(tick(&state, &input, &s, &pad, e) == 1 && is_key(&e[0], 'W', 1));
+    s = sample(SQUARE, SQUARE);
+    s.ly = 0;
+    assert(tick(&state, &input, &s, &pad, e) == 0);
+    s = sample(0, SQUARE);
+    s.ly = 0;
+    assert(tick(&state, &input, &s, &pad, e) == 0);
+    s = sample(0, 0);
+    assert(tick(&state, &input, &s, &pad, e) == 1 && is_key(&e[0], 'W', 0));
+    /* a release lets go of a shared key once */
+    s = sample(CROSS | CIRCLE, 0);
+    assert(tick(&state, &input, &s, &pad, e) == 3);
+    assert(pw_input_map_release(&state, &input.map, input.mode, NULL, e, PW_INPUT_MAP_EVENT_MAX) == 3);
+    assert(is_key(&e[0], 'S', 0) && is_key(&e[1], 'D', 0) && is_key(&e[2], 0x11, 0));
+}
+
+/* One read can hold more than one pull of a trigger: a threshold sees each. */
+static void test_trigger_reads(void)
+{
+    PwGameInput input = mapped_input("mode = keyboard\nmap = 1\nr2 = key:e\nr2_threshold = 30\n");
+    PwInputMapState state;
+    PwInputMapPad pad;
+    PwInputMapEvent e[PW_INPUT_MAP_EVENT_MAX];
+    PwInputMapSample s;
+    uint8_t l2[3] = { 0, 0, 0 }, r2[3];
+
+    /* 30 %: down at 76, up at 63 */
+    pw_input_map_init(&state);
+    s = sample(0, 0);
+    s.pulls[0] = l2;
+    s.pulls[1] = r2;
+    s.pull_count = 2;
+    r2[0] = 80; r2[1] = s.r2 = 70;  /* crossed, and stays past the release point */
+    assert(tick(&state, &input, &s, &pad, e) == 1 && is_key(&e[0], 'E', 1));
+    r2[0] = 50; r2[1] = s.r2 = 70;  /* came back under 63 within the read */
+    assert(tick(&state, &input, &s, &pad, e) == 1 && is_key(&e[0], 'E', 0));
+    r2[0] = 80; r2[1] = s.r2 = 70;
+    assert(tick(&state, &input, &s, &pad, e) == 1 && is_key(&e[0], 'E', 1));
+    r2[0] = 50; r2[1] = s.r2 = 80;  /* let go and pulled again */
+    assert(tick(&state, &input, &s, &pad, e) == 2 && is_key(&e[0], 'E', 0) && is_key(&e[1], 'E', 1));
+    s.pull_count = 3;
+    r2[0] = 20; r2[1] = 90; r2[2] = s.r2 = 10;  /* a tap within one read: down and up */
+    assert(tick(&state, &input, &s, &pad, e) == 3 && is_key(&e[0], 'E', 0) && is_key(&e[1], 'E', 1) &&
+           is_key(&e[2], 'E', 0));
+
+    /* through the title's pad: the read's pulls come with it */
+    PwPadPs5 real, mapped;
+    PwWineInput out[PW_INPUT_MAP_EVENT_MAX];
+    pw_input_map_init(&state);
+    memset(&real, 0, sizeof(real));
+    real.core.connected = 1;
+    real.left_stick.x = real.left_stick.y = real.right_stick.x = real.right_stick.y = 0x80;
+    real.pulls[1][0] = 80;
+    real.pulls[1][1] = real.r2 = 70;
+    real.pull_count = 2;
+    assert(pw_wine_input_map(&state, &input, &real, TICK, 0, &mapped, out, PW_INPUT_MAP_EVENT_MAX) == 1 &&
+           out[0].type == PW_WINE_INPUT_KEY && out[0].code == 'E' && out[0].down == 1);
+    assert(mapped.pull_count == 0);
+    /* pulls that do not end with the newest are not the read's: only r2 counts */
+    pw_input_map_init(&state);
+    real.pulls[1][1] = 99;
+    assert(pw_wine_input_map(&state, &input, &real, TICK, 0, &mapped, out, PW_INPUT_MAP_EVENT_MAX) == 0);
+}
+
+/* A button let go and pressed again between two ticks, while the console's
+ * keyboard is closed: its view keeps the press, and the map sends both. */
+static void test_repress(void)
+{
+    PwGameInput input = mapped_input("mode = keyboard\nmap = 1\ncross = key:space\n");
+    PwInputMapState state;
+    PwInputMapPad pad;
+    PwInputMapEvent e[PW_INPUT_MAP_EVENT_MAX];
+    PwInputMapSample s;
+    PwOsk osk;
+    PwOskView view;
+
+    memset(&osk, 0, sizeof(osk));
+    pw_input_map_init(&state);
+    assert(!pw_osk_tick(&osk, CROSS, CROSS, 0, 0, &view));
+    s = sample(view.held, 0);
+    s.pressed = view.pressed;
+    s.released = view.released;
+    assert(tick(&state, &input, &s, &pad, e) == 1 && is_key(&e[0], 0x20, 1));
+    assert(!pw_osk_tick(&osk, CROSS, CROSS, CROSS, 0, &view));
+    s = sample(view.held, 0);
+    s.pressed = view.pressed;
+    s.released = view.released;
+    assert(tick(&state, &input, &s, &pad, e) == 2 && is_key(&e[0], 0x20, 0) && is_key(&e[1], 0x20, 1));
+}
+
+/* A DualShock 4 has no Guide: a [launcher] preset in playstation mode makes
+ * the game's controller one, and an xinput map's Guide then sends nothing,
+ * not the touchpad's click. */
+static void test_dualshock_guide(void)
+{
+    PwGameInput input = mapped_input("mode = xinput\nmap = 1\ncross = pad:guide\ncircle = pad:back\n");
+    PwInputMapState state;
+    PwPadPs5 real, mapped;
+    PwWineInput out[PW_INPUT_MAP_EVENT_MAX];
+    PwWinePad game;
+    PwWinePadExtra extra;
+
+    memset(&real, 0, sizeof(real));
+    real.core.connected = 1;
+    real.core.previous_buttons = real.core.pressed_edges = CROSS | CIRCLE;
+    real.left_stick.x = real.left_stick.y = real.right_stick.x = real.right_stick.y = 0x80;
+    pw_input_map_init(&state);
+    pw_wine_input_map(&state, &input, &real, TICK, 1, &mapped, out, PW_INPUT_MAP_EVENT_MAX);
+    assert(pw_wine_game_pad_playstation(&mapped, &game, &extra));
+    assert(!(extra.buttons & PW_WINE_PAD_TOUCHPAD) && (extra.buttons & PW_WINE_PAD_SHARE));
+    /* the XInput controller: Guide as ever */
+    pw_input_map_init(&state);
+    pw_wine_input_map(&state, &input, &real, TICK, 0, &mapped, out, PW_INPUT_MAP_EVENT_MAX);
+    assert(pw_wine_game_pad(&mapped, &game) && (game.buttons & 0x0400u) && (game.buttons & 0x0020u));
 }
 
 /* ---- The old presets and their templates give the same input ----------- */
@@ -445,7 +639,8 @@ static void equivalent(const char *name, const char *preset, const char *templat
         pw_wine_pad_unbound(&pad, &old, &unbound);
         ca = controller(&unbound, old.mode, &pa, &xa);
         /* the map */
-        nb = pw_wine_input_map(&state, &map, &pad, TICK, &mapped, b, PW_INPUT_MAP_EVENT_MAX);
+        nb = pw_wine_input_map(&state, &map, &pad, TICK, map.mode == PW_GAME_INPUT_PLAYSTATION, &mapped, b,
+                               PW_INPUT_MAP_EVENT_MAX);
         cb = controller(&mapped, map.mode, &pb, &xb);
         if (na != nb || memcmp(a, b, na * sizeof(a[0])) || ca != cb || memcmp(&pa, &pb, sizeof(pa)) ||
             memcmp(&xa, &xb, sizeof(xa))) {
@@ -502,12 +697,95 @@ static void test_presets(void)
     equivalent("xinput with keys", "[input]\nmode = xinput\ncross = space\nr2 = mouse_left\ntouchpad = m\n",
                "mode = xinput\nmap = 1\ncross = key:space\nr2 = mouse:left\ntouchpad_left = key:m\n"
                "touchpad_right = key:m\n", 20000);
-    /* the WASD template parses, fits and runs */
-    {
-        PwGameInput wasd = mapped_input("mode = keyboard\nmap = 1\n" WASD);
-        assert(wasd.map.stick[0].mode == PW_GAME_STICK_MODE_KEYS && wasd.map.stick[1].mode == PW_GAME_STICK_MODE_MOUSE);
-        assert(strlen(GAMEPAD) < 4096 && strlen(MOUSE) < 4096 && strlen(ARROWS) < 4096 && strlen(WASD) < 4096);
+    assert(strlen(GAMEPAD) < 4096 && strlen(MOUSE) < 4096 && strlen(ARROWS) < 4096 && strlen(WASD) < 4096);
+}
+
+/* The pointer stick as it was before the map: its own copy, so a change to
+ * the shared curve shows here. */
+static int64_t old_travel(uint8_t stick, uint32_t speed, uint32_t elapsed_us)
+{
+    int32_t axis = (int32_t)stick - 0x80, magnitude = axis < 0 ? -axis : axis;
+    int64_t t, v;
+
+    if (magnitude <= 20) return 0;
+    t = (int64_t)(magnitude - 20) * 65536 / (127 - 20);
+    if (t > 65536) t = 65536;
+    v = t * t >> 16;
+    v = v * speed * elapsed_us / 1000000;
+    return axis < 0 ? -v : v;
+}
+
+static void test_travel(void)
+{
+    static const uint32_t speeds[] = { 1, 900, 1200, 20000 }, times[] = { 1, 16000, 16667, 1000000 };
+    for (int v = 0; v < 256; v++)
+        for (size_t i = 0; i < 4; i++)
+            for (size_t k = 0; k < 4; k++)
+                assert(pw_input_map_travel(v - 128, 20, 0, PW_GAME_CURVE_SQUARED, speeds[i], times[k]) ==
+                       old_travel((uint8_t)v, speeds[i], times[k]));
+}
+
+/* The WASD and mouse template, input by input: what each sends, and a
+ * controller that reads idle. */
+static void test_wasd(void)
+{
+    static const struct { uint32_t button; int left; uint32_t type, code; int x; } sends[] = {
+        { CROSS, 0, PW_INPUT_MAP_KEY, 0x20, 0 }, { CIRCLE, 0, PW_INPUT_MAP_KEY, 0x11, 0 },
+        { SQUARE, 0, PW_INPUT_MAP_KEY, 'R', 0 }, { TRIANGLE, 0, PW_INPUT_MAP_KEY, 'E', 0 },
+        { L1, 0, PW_INPUT_MAP_KEY, 'Q', 0 }, { R1, 0, PW_INPUT_MAP_KEY, 'F', 0 },
+        { L2, 0, PW_INPUT_MAP_MOUSE_BUTTON, 1, 0 }, { R2, 0, PW_INPUT_MAP_MOUSE_BUTTON, 0, 0 },
+        { L3, 0, PW_INPUT_MAP_KEY, 0x10, 0 }, { R3, 0, PW_INPUT_MAP_KEY, 'V', 0 },
+        { UP, 0, PW_INPUT_MAP_MOUSE_WHEEL, 0, 1 }, { DOWN, 0, PW_INPUT_MAP_MOUSE_WHEEL, 0, -1 },
+        { LEFT, 0, PW_INPUT_MAP_KEY, '1', 0 }, { RIGHT, 0, PW_INPUT_MAP_KEY, '2', 0 },
+        { OPTIONS, 0, PW_INPUT_MAP_KEY, 0x1b, 0 }, { CREATE, 0, PW_INPUT_MAP_KEY, 0x09, 0 },
+        { TOUCHPAD, 1, PW_INPUT_MAP_KEY, 'M', 0 }, { TOUCHPAD, 0, PW_INPUT_MAP_KEY, 'I', 0 },
+    };
+    static const struct { uint8_t lx, ly; uint32_t vk; } stick[] = {
+        { 128, 0, 'W' }, { 128, 255, 'S' }, { 0, 128, 'A' }, { 255, 128, 'D' },
+    };
+    PwGameInput wasd = mapped_input("mode = keyboard\nmap = 1\n" WASD);
+    PwInputMapState state;
+    PwInputMapPad pad;
+    PwInputMapEvent e[PW_INPUT_MAP_EVENT_MAX];
+    PwInputMapSample s;
+
+    assert(wasd.mode == PW_GAME_INPUT_KEYBOARD);
+    pw_input_map_init(&state);
+    for (size_t i = 0; i < sizeof(sends) / sizeof(sends[0]); i++) {
+        const int wheel = sends[i].type == PW_INPUT_MAP_MOUSE_WHEEL;
+        s = sample(sends[i].button, 0);
+        s.touch_left = sends[i].left;
+        s.touch_fingers = 1;
+        s.l2 = s.r2 = 255;
+        assert(tick(&state, &wasd, &s, &pad, e) == 1);
+        assert(e[0].type == sends[i].type && e[0].code == sends[i].code && e[0].x == sends[i].x &&
+               e[0].down == (wheel ? 0u : 1u));
+        assert(pad.buttons == 0);
+        s = sample(0, sends[i].button);
+        assert(tick(&state, &wasd, &s, &pad, e) == (wheel ? 0u : 1u));
+        if (!wheel) assert(e[0].type == sends[i].type && e[0].code == sends[i].code && e[0].down == 0);
     }
+    for (size_t i = 0; i < 4; i++) {
+        s = sample(0, 0);
+        s.lx = stick[i].lx;
+        s.ly = stick[i].ly;
+        assert(tick(&state, &wasd, &s, &pad, e) == 1 && is_key(&e[0], stick[i].vk, 1));
+        s = sample(0, 0);
+        assert(tick(&state, &wasd, &s, &pad, e) == 1 && is_key(&e[0], stick[i].vk, 0));
+    }
+    /* the right stick moves the pointer, right and down */
+    size_t moves = 0;
+    for (int i = 0; i < 10; i++) {
+        s = sample(0, 0);
+        s.rx = s.ry = 255;
+        size_t n = tick(&state, &wasd, &s, &pad, e);
+        for (size_t k = 0; k < n; k++) {
+            assert(e[k].type == PW_INPUT_MAP_MOUSE_MOVE && e[k].x > 0 && e[k].y > 0);
+            moves++;
+        }
+        assert(pad.lx == 128 && pad.rx == 128 && pad.l2 == 0 && pad.r2 == 0);
+    }
+    assert(moves == 10);
 }
 
 int main(void)
@@ -517,7 +795,13 @@ int main(void)
     test_triggers();
     test_sticks();
     test_release();
+    test_shared_keys();
+    test_trigger_reads();
+    test_repress();
+    test_dualshock_guide();
     test_presets();
+    test_travel();
+    test_wasd();
     printf("input map passed: remaps, keys and combinations, mouse buttons and the wheel, touchpad halves, "
            "triggers with thresholds, stick modes, letting go, and the old presets matched by their templates\n");
     return 0;

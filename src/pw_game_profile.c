@@ -124,6 +124,10 @@ static int same(const uint8_t *text, size_t length, const char *name);
 enum { MAP_SEEN_ON = 0, MAP_SEEN_INPUT = 1, MAP_SEEN_THRESHOLD = MAP_SEEN_INPUT + PW_GAME_MAP_INPUTS,
        MAP_SEEN_STICK = MAP_SEEN_THRESHOLD + 2, MAP_SEEN_TUNING = MAP_SEEN_STICK + PW_GAME_MAP_STICKS };
 enum { TUNE_DEADZONE, TUNE_OUTER, TUNE_CURVE, TUNE_SPEED, TUNE_INVERT_X, TUNE_INVERT_Y, TUNE_KEYS, TUNE_COUNT };
+/* and a mode, rumble or player2 line not written as the map writes it, for
+ * a map = 1 that comes after it */
+enum { MAP_SEEN_LOOSE = 63 };
+_Static_assert(MAP_SEEN_TUNING + PW_GAME_MAP_STICKS * TUNE_COUNT <= MAP_SEEN_LOOSE, "map seen bits");
 
 static const char *const map_inputs[PW_GAME_MAP_INPUTS] = {
     "cross", "circle", "square", "triangle", "l1", "r1", "l2", "r2", "l3", "r3",
@@ -445,16 +449,35 @@ PwGameMapTarget pw_game_map_target(const PwGameMap *map, size_t input, PwGameInp
     return target;
 }
 
+/* A mode, rumble or player2 line as the map's grammar has it: key and
+ * value in lower case, a number without a leading zero. */
+static int map_shared_line(const uint8_t *key, size_t key_length, const uint8_t *v, size_t n)
+{
+    if (!same(key, key_length, "mode") && !same(key, key_length, "rumble") && !same(key, key_length, "player2"))
+        return 0;
+    for (size_t i = 0; i < n; i++)
+        if (v[i] >= 'A' && v[i] <= 'Z') return 0;
+    return !(same(key, key_length, "rumble") && n > 1 && v[0] == '0');
+}
+
 static int input_field(PwGameInput *input, const uint8_t *key, size_t key_length,
                        const uint8_t *v, size_t n, int allow_preset)
 {
+    const int shared = is(key, key_length, "mode") || is(key, key_length, "rumble") || is(key, key_length, "player2");
+
+    /* mode, rumble and player2 keep their meaning with map = 1, written as
+     * strictly as the map's own lines, before map = 1 as well as after */
+    if (shared && !map_shared_line(key, key_length, v, n)) {
+        if (input->map.on) return PW_ERR_MALFORMED;
+        input->map.seen |= 1ull << MAP_SEEN_LOOSE;
+    }
     /* map = 1: in the profile's own [input], before any button line,
      * preset, mouse or mouse_speed (docs/INPUT_MAP.md). */
     if (same(key, key_length, "map")) {
         int bound = 0;
         for (size_t i = 0; i < PW_GAME_BUTTON_COUNT; i++) bound |= input->bindings[i].kind != PW_GAME_BIND_UNSET;
         if (!allow_preset || input->map.on || bound || (input->set & (SET_PRESET | SET_MOUSE | SET_SPEED)) ||
-            !same(v, n, "1"))
+            (input->map.seen & (1ull << MAP_SEEN_LOOSE)) || !same(v, n, "1"))
             return PW_ERR_MALFORMED;
         input->map.on = 1;
         input->map.seen |= 1ull << MAP_SEEN_ON;
@@ -463,8 +486,7 @@ static int input_field(PwGameInput *input, const uint8_t *key, size_t key_length
     if (input->map.on) {
         if (is(key, key_length, "preset") || is(key, key_length, "mouse") || is(key, key_length, "mouse_speed"))
             return PW_ERR_MALFORMED;
-        if (!is(key, key_length, "mode") && !is(key, key_length, "rumble") && !is(key, key_length, "player2"))
-            return map_field(&input->map, key, key_length, v, n);
+        if (!shared) return map_field(&input->map, key, key_length, v, n);
     }
     if (is(key, key_length, "preset")) {
         if (!allow_preset || (input->set & SET_PRESET)) return PW_ERR_MALFORMED;

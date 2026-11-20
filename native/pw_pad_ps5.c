@@ -67,7 +67,8 @@ static int valid_ops(const PwPadPs5Ops *ops)
 
 static void centre_analog(PwPadPs5 *pad)
 {
-    pad->left_stick=pad->right_stick=(PwPadPs5Stick){0x80,0x80};pad->l2=pad->r2=0;pad->touch_held=pad->finger_down=0;
+    pad->left_stick=pad->right_stick=(PwPadPs5Stick){0x80,0x80};pad->l2=pad->r2=0;pad->pull_count=0;
+    pad->touch_held=pad->finger_down=0;
 }
 
 /* A connected sample's touchpad click: which half it began on. */
@@ -149,6 +150,9 @@ static int read_batch(PwPadPs5 *pad,PwPadSample samples[PW_PAD_PS5_BATCH])
      * Without this reset a Create press followed by an empty read could be
      * consumed repeatedly by the title lifecycle adapter. */
     pad->core.pressed_edges=0;pad->core.released_edges=0;
+    /* The pulls, like the edges, are the read's own; an empty read keeps
+     * the newest. */
+    if(pad->pull_count){pad->pulls[0][0]=pad->l2;pad->pulls[1][0]=pad->r2;pad->pull_count=1;}
     int count=pad->ops.pad_read(pad->pad_handle,raw,PW_PAD_PS5_BATCH);pad->last_read_rc=count;
     /* A system menu over the title has the pad, whatever its samples say,
      * and keeps it until the buttons that closed the menu are up. */
@@ -188,6 +192,9 @@ static int read_batch(PwPadPs5 *pad,PwPadSample samples[PW_PAD_PS5_BATCH])
             pad->connected_samples++;
             pad->left_stick=raw[i].left_stick;pad->right_stick=raw[i].right_stick;
             pad->l2=raw[i].l2;pad->r2=raw[i].r2;track_touch(pad,&raw[i]);
+            /* a read starts its own pulls with its first sample */
+            if(pad->pull_count && !i)pad->pull_count=0;
+            pad->pulls[0][pad->pull_count]=raw[i].l2;pad->pulls[1][pad->pull_count]=raw[i].r2;pad->pull_count++;
         }
         else{pad->disconnected_samples++;centre_analog(pad);}
     }

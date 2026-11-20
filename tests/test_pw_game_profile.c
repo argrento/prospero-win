@@ -1058,6 +1058,9 @@ static void test_input_map(void)
     assert(parse(APP "[input]\nmode = playstation\nrumble = 40\nmap = 1\nplayer2 = p2\ncross = pad:b\n", &p) == PW_OK &&
            p.input.mode == PW_GAME_INPUT_PLAYSTATION && p.input.rumble == 40 && !strcmp(p.input.player2, "p2"));
     assert(parse(APP "[input]\nmap = 1\nmode = keyboard\n", &p) == PW_OK);
+    /* without map = 1 they are read as before, in any case */
+    assert(parse(APP "[input]\nMODE = KEYBOARD\nRumble = 050\nplayer2 = p2\n", &p) == PW_OK &&
+           p.input.mode == PW_GAME_INPUT_KEYBOARD && p.input.rumble == 50 && !p.input.map.on);
 
     static const char *const refused[] = {
         /* where map goes */
@@ -1067,6 +1070,11 @@ static void test_input_map(void)
         "[input]\nmouse_speed = 900\nmap = 1\n", "[input]\nleft_stick = keys\nmap = 1\n",
         "[input]\nmap = 1\npreset = gamepad\n", "[input]\nmap = 1\nmouse = none\n",
         "[input]\nmap = 1\nmouse_speed = 900\n", "[launcher]\nmap = 1\n",
+        /* the lines it keeps are as strict as its own, before it as well as after */
+        "[input]\nmap = 1\nMODE = KEYBOARD\n", "[input]\nmap = 1\nmode = KEYBOARD\n", "[input]\nmap = 1\nMode = keyboard\n",
+        "[input]\nmap = 1\nrumble = 050\n", "[input]\nmap = 1\nRUMBLE = 50\n", "[input]\nmap = 1\nPlayer2 = p2\n",
+        "[input]\nMODE = KEYBOARD\nmap = 1\n", "[input]\nmode = Keyboard\nmap = 1\n", "[input]\nrumble = 050\nmap = 1\n",
+        "[input]\nPLAYER2 = p2\nmap = 1\n",
         /* old-style values and the old touchpad */
         "[input]\nmap = 1\ncross = z\n", "[input]\nmap = 1\nr2 = mouse_left\n", "[input]\nmap = 1\ncross = vk:0x41\n",
         "[input]\nmap = 1\ntouchpad = pad:back\n", "[input]\nmap = 1\nps = none\n",

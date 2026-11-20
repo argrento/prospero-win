@@ -2103,6 +2103,8 @@ int main(int argc, char **argv)
     static PwPadPs5 map_pad;
     static PwWineInput map_events[PW_INPUT_MAP_EVENT_MAX];
     size_t map_count = 0;
+    /* the map's releases that Wine's input queue refused, posted again first */
+    static PwWineBacklog input_backlog;
     const char *input_label = "", *other_label = "";
     int has_other_input = 0, needs_xinput = 0, needs_playstation = 0;
     /* [input] player2: a second signed-in user's DualSense as more keys. */
@@ -3179,6 +3181,7 @@ int main(int argc, char **argv)
                 game_pad.left_stick.x = game_pad.left_stick.y = 0x80;
                 game_pad.right_stick.x = game_pad.right_stick.y = 0x80;
                 game_pad.l2 = game_pad.r2 = 0;
+                game_pad.pull_count = 0;
                 /* and no finger on a DualShock 4's touchpad */
                 game_pad.finger_down = game_pad.finger_count = 0;
                 game_pad.touch_held = 0;
@@ -3193,16 +3196,23 @@ int main(int argc, char **argv)
              * follow the same preset on this tick. A map lets go of all it
              * holds, and one swapped in keeps what is held from the game
              * until it is let go. */
-            size_t count = game_input.map.on ?
+            const int was_map = game_input.map.on;
+            size_t count = was_map ?
                 pw_wine_input_map_release(&input_map, &game_input, NULL, map_events, PW_INPUT_MAP_EVENT_MAX) :
                 pw_wine_game_inputs(&game_input, 0, game_pad.core.previous_buttons | game_pad.core.released_edges,
                                     map_events, PW_INPUT_MAP_EVENT_MAX);
             PwGameInput swap = game_input;
             const char *label = input_label;
 
-            for (size_t i = 0; i < count; i++) {
-                if (post_input(&map_events[i]) == 0) posted++;
-                else refused++;
+            if (was_map && post_input) {
+                size_t dropped = 0;
+                posted += pw_wine_post_inputs(&input_backlog, map_events, count, post_input, &dropped);
+                refused += dropped;
+            } else {
+                for (size_t i = 0; i < count; i++) {
+                    if (post_input(&map_events[i]) == 0) posted++;
+                    else refused++;
+                }
             }
             game_input = other_input;
             other_input = swap;
@@ -3220,10 +3230,9 @@ int main(int argc, char **argv)
          * let go, sticks and triggers as well as buttons. */
         if (pad_read && game_input.map.on && others_idle) {
             size_t count = pw_wine_input_map_release(&input_map, &game_input, &pad, map_events, PW_INPUT_MAP_EVENT_MAX);
-            for (size_t i = 0; i < count; i++) {
-                if (post_input(&map_events[i]) == 0) posted++;
-                else refused++;
-            }
+            size_t dropped = 0;
+            if (post_input) posted += pw_wine_post_inputs(&input_backlog, map_events, count, post_input, &dropped);
+            refused += dropped;
         }
         /* The map's controller and events for this tick, from the pad as the
          * game sees it; posted below, with the rumble. While the menu or the
@@ -3234,8 +3243,8 @@ int main(int argc, char **argv)
             map_pad = *seen;
             map_pad.core.previous_buttons = map_pad.core.pressed_edges = map_pad.core.released_edges = 0;
         } else if (pad_read && game_input.map.on) {
-            map_count = pw_wine_input_map(&input_map, &game_input, seen, PW_WINE64_TICK_US, &map_pad, map_events,
-                                          PW_INPUT_MAP_EVENT_MAX);
+            map_count = pw_wine_input_map(&input_map, &game_input, seen, PW_WINE64_TICK_US, set_pad_extra != NULL,
+                                          &map_pad, map_events, PW_INPUT_MAP_EVENT_MAX);
         }
         /* XInput controller 0: the DualSense, and in a script build the
          * macro's controller added to it, every frame, so a scripted press
@@ -3345,11 +3354,13 @@ int main(int argc, char **argv)
                 }
             }
         }
-        if (pad_read && game_input.map.on) {
-            for (size_t i = 0; i < map_count; i++) {
-                if (post_input(&map_events[i]) == 0) posted++;
-                else refused++;
-            }
+        /* The map's events, after any release Wine refused before; the
+         * backlog is tried every tick, under any preset. */
+        if (post_input && ((pad_read && game_input.map.on) || input_backlog.count)) {
+            size_t dropped = 0;
+            posted += pw_wine_post_inputs(&input_backlog, map_events, pad_read && game_input.map.on ? map_count : 0,
+                                          post_input, &dropped);
+            refused += dropped;
         }
         if (pad_read) {
             size_t count = game_input.map.on ? 0 :
