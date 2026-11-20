@@ -846,6 +846,8 @@ static void usb_drive_substitution_contract(void)
     strcpy(profile.app.executable, "Z:\\mnt\\usb\\g\\a.exe");
     strcpy(profile.app.working_directory, "Z:\\mnt\\usb\\g");
     strcpy(profile.app.arguments, "-a Z:\\mnt\\usb\\g\\x -b Z:\\mnt\\usb\\g\\y");
+    profile.has_helper = 1;
+    strcpy(profile.helper_program, "Z:\\mnt\\usb\\g\\launcher\\Launcher.exe");
     profile.environment_count = 2;
     strcpy(profile.environment[0].name, "A"); strcpy(profile.environment[0].value, "Z:\\mnt\\usb\\g");
     strcpy(profile.environment[1].name, "B"); strcpy(profile.environment[1].value, "Z:\\data\\usb\\g");
@@ -864,6 +866,8 @@ static void usb_drive_substitution_contract(void)
     CHECK(!strcmp(profile.app.arguments, "-a Z:\\mnt\\usb7\\g\\x -b Z:\\mnt\\usb7\\g\\y"));
     CHECK(!strcmp(profile.environment[0].value, "Z:\\mnt\\usb7\\g"));
     CHECK(!strcmp(profile.environment[1].value, "Z:\\data\\usb\\g"));
+    /* A publisher's launcher beside the game is on the game's drive too. */
+    CHECK(!strcmp(profile.helper_program, "Z:\\mnt\\usb7\\g\\launcher\\Launcher.exe"));
     /* Admission reads either case of the letter, so this does; other drives keep their path. */
     memset(&profile, 0, sizeof(profile));
     strcpy(profile.app.executable, "z:\\mnt\\usb\\g\\a.exe");

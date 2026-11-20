@@ -849,7 +849,8 @@ int pw_title_publication_use_game_mount(PwGameProfile *profile, const char *moun
         mount[token + 1]) return failure(error, error_size, "invalid game mount");
     if (use_mount_in(profile->app.executable, sizeof(profile->app.executable), mount[token]) ||
         use_mount_in(profile->app.working_directory, sizeof(profile->app.working_directory), mount[token]) ||
-        use_mount_in(profile->app.arguments, sizeof(profile->app.arguments), mount[token]))
+        use_mount_in(profile->app.arguments, sizeof(profile->app.arguments), mount[token]) ||
+        use_mount_in(profile->helper_program, sizeof(profile->helper_program), mount[token]))
         return failure(error, error_size, "game path too long for its drive");
     for (size_t i = 0; i < profile->environment_count; ++i)
         if (use_mount_in(profile->environment[i].value, sizeof(profile->environment[i].value), mount[token]))
