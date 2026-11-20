@@ -3204,15 +3204,13 @@ int main(int argc, char **argv)
             PwGameInput swap = game_input;
             const char *label = input_label;
 
-            if (was_map && post_input) {
+            /* Either grammar's releases go through the backlog: one Wine
+             * refuses now is posted again before anything else, so a key
+             * never stays down across the swap. */
+            if (post_input) {
                 size_t dropped = 0;
                 posted += pw_wine_post_inputs(&input_backlog, map_events, count, post_input, &dropped);
                 refused += dropped;
-            } else {
-                for (size_t i = 0; i < count; i++) {
-                    if (post_input(&map_events[i]) == 0) posted++;
-                    else refused++;
-                }
             }
             game_input = other_input;
             other_input = swap;
@@ -3380,9 +3378,14 @@ int main(int argc, char **argv)
                                                       game_input.mouse_speed,
                                                       PW_WINE64_TICK_US, &events[count]);
             }
+            /* One at a time, after any release still waiting in the backlog:
+             * a new press of a key can't overtake its release, a release Wine
+             * refuses waits there, and a refused press holds nothing else
+             * back. */
             for (size_t i = 0; i < count; i++) {
-                if (post_input(&events[i]) == 0) posted++;
-                else refused++;
+                size_t dropped = 0;
+                posted += pw_wine_post_inputs(&input_backlog, &events[i], 1, post_input, &dropped);
+                refused += dropped;
             }
             /* The rumble the game asked for: XInput's left motor is the
              * DualSense's large one, speeds 0..65535 become 0..255, scaled
@@ -3436,9 +3439,12 @@ int main(int argc, char **argv)
                 size_t count2 = pw_wine_game_inputs(&game_input2, pad2.core.pressed_edges,
                                                     pad2.core.released_edges, events,
                                                     sizeof(events) / sizeof(events[0]) - 1);
+                /* Through the same backlog as the first pad's events, so the
+                 * second can't press a key whose release is still waiting. */
                 for (size_t i = 0; i < count2; i++) {
-                    if (post_input(&events[i]) == 0) posted++;
-                    else refused++;
+                    size_t dropped = 0;
+                    posted += pw_wine_post_inputs(&input_backlog, &events[i], 1, post_input, &dropped);
+                    refused += dropped;
                 }
             }
             int32_t after = -1;
