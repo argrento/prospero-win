@@ -3219,11 +3219,17 @@ int main(int argc, char **argv)
             input_label = other_label;
             other_label = label;
             input_switch_notify(input_label);
+            /* The incoming input starts from the next press: what went down
+             * on this tick is held, and a map latches it below (a press edge,
+             * or a trigger pull replayed from this read, would free it at
+             * once). */
             game_pad.core.released_edges = 0;
+            game_pad.core.pressed_edges = 0;
             if (game_input.map.on) {
                 pw_input_map_init(&input_map);
                 (void)pw_wine_input_map_release(&input_map, &game_input, &game_pad, map_events, PW_INPUT_MAP_EVENT_MAX);
             }
+            game_pad.pull_count = 0;
         }
         /* The menu or the console's keyboard has the pad: the map lets go,
          * and what the real pad holds stays away from the game until it is
