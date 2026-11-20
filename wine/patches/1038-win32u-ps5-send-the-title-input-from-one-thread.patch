@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Fri, 20 Nov 2026 13:00:00 +0100
+Subject: [PATCH] win32u: Send the PS5 title's input from one thread at a time.
+
+Every GUI thread's message wait calls the driver's ProcessEvents, and the
+wake pipe sets QS_DRIVER on all their queues, so several threads take
+events from the title's queue at once. Two events posted together, such
+as the Ctrl and S of one key combination, could then reach the server in
+either order: one thread took Ctrl, another took S and sent it first, and
+the game saw S before Ctrl. Let one thread at a time take and send the
+events; a thread that finds another one sending leaves the queue to it,
+since that one takes every event, in order.
+---
+ dlls/win32u/ps5drv.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/dlls/win32u/ps5drv.c b/dlls/win32u/ps5drv.c
+--- a/dlls/win32u/ps5drv.c
++++ b/dlls/win32u/ps5drv.c
+@@ -738,6 +738,12 @@
+     TRACE( "gamepad connected or disconnected (%u): WM_DEVICECHANGE\n", changes );
+     NtUserPostMessage( HWND_BROADCAST, WM_DEVICECHANGE, DBT_DEVNODES_CHANGED, 0 );
+ }
++
++/* Every GUI thread's message wait calls ProcessEvents, and several can run it at
++ * once. Events taken from the queue by two threads could reach the server in
++ * either order (Ctrl and S of one key combination as S, Ctrl), so one thread
++ * at a time takes and sends them. */
++static pthread_mutex_t input_lock = PTHREAD_MUTEX_INITIALIZER;
+ 
+ static BOOL ps5_ProcessEvents( DWORD mask )
+ {
+@@ -770,6 +776,9 @@
+             polled = TRUE;
+         }
+     }
++    /* A thread that finds another sending leaves the queue to it: that one
++     * takes every event, in order. */
++    if (pthread_mutex_trylock( &input_lock )) goto done;
+     while (processed < PS5_INPUT_BATCH && next_input( &event ))
+     {
+         INPUT input = {.type = INPUT_KEYBOARD};
+@@ -796,6 +805,8 @@
+             break;
+         }
+     }
++    pthread_mutex_unlock( &input_lock );
++done:
+     notify_pad_changes();
+     /* The wake pipe is every GUI thread's queue fd, so a byte sets QS_DRIVER
+      * on all their queues while one of them drains it and takes the events;
