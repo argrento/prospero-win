@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Thu, 19 Nov 2026 03:00:00 +0100
+Subject: [PATCH] kernelbase: Read the launcher helper's pid and image as the
+ process starts.
+
+Patch 1023 read PW_LAUNCHER_PID and PW_LAUNCHER_IMAGE the first time a
+module query asked about another process, from the environment as it was
+then. A game may change its environment before its launcher check runs;
+read both once while kernelbase starts instead.
+---
+ dlls/kernelbase/debug.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/dlls/kernelbase/debug.c b/dlls/kernelbase/debug.c
+index b166556e87..65807780ec 100644
+--- a/dlls/kernelbase/debug.c
++++ b/dlls/kernelbase/debug.c
+@@ -677,9 +677,16 @@
+  * WINE_PS5_NTDLL_DIR; it is read at start, not on the crash path. */
+ static BOOL no_debugger;
+ 
++static DWORD pw_launcher_pid(void);
++static const WCHAR *pw_launcher_image(void);
++
+ void init_debugger(void)
+ {
+     no_debugger = GetEnvironmentVariableW( L"WINE_PS5_NTDLL_DIR", NULL, 0 ) > 0;
++    /* The launcher helper's pid and image, read once as the process starts:
++     * a game may change its environment before its launcher check runs. */
++    pw_launcher_pid();
++    pw_launcher_image();
+ }
+ 
+ 

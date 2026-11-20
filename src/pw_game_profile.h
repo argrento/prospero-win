@@ -74,6 +74,9 @@
  *                          ; no ready line it starts as soon as the program
  *                          ; does. The game runs without its helper when the
  *                          ; process cannot start
+ *   identity = launcher    ; this helper is the game's required storefront
+ *                          ; launcher: the runtime reports it as the game's
+ *                          ; parent and answers module queries about it
  *
  *   [audio]
  *   volume = 50            ; how loud the game plays, 0 (muted) to 100 (the
@@ -263,6 +266,7 @@ typedef struct PwGameProfile {
     char helper_program[PW_GAME_HELPER_PATH_CAPACITY];  /* a Windows path */
     char helper_ready[PW_GAME_HELPER_PATH_CAPACITY];    /* below drive_c, '/' separated; empty for none */
     uint32_t helper_wait;       /* seconds to wait for helper_ready */
+    int helper_identity_launcher;  /* [helper] identity = launcher: the game's required storefront launcher */
     /* [steam] install_dir: the game's folder in steamapps\common, where the
      * title shows it to Wine (pw_steam_view.h); empty for none. */
     char steam_install_dir[PW_STEAM_INSTALL_DIR_CAPACITY];

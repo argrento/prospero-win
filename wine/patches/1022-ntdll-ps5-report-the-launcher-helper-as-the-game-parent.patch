@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Sun, 16 Nov 2026 13:00:00 +0100
+Subject: [PATCH] ntdll: Report a title's launcher helper as the game's parent on
+ PS5.
+
+A storefront game checks that its parent process is the launcher. The launcher runs as the title's helper process
+(a sibling, not the parent), so the game finds no launcher. When the title sets PW_LAUNCHER_PID for a game whose
+[helper] is a launcher, NtQuerySystemInformation's process list and NtQueryInformationProcess(ProcessBasicInformation)
+report that helper's pid as the game's own parent. Only the current process's own entry is changed.
+---
+diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
+index 8db3294..89fc7bd 100644
+--- a/dlls/ntdll/unix/process.c
++++ b/dlls/ntdll/unix/process.c
+@@ -1489,6 +1489,14 @@ static BOOL first_query( PROCESSINFOCLASS class )
+ }
+ #endif
+ 
++static DWORD pw_launcher_pid_u(void)
++{
++    static int init;
++    static DWORD pid;
++    if (!init) { const char *e = getenv( "PW_LAUNCHER_PID" ); pid = e ? strtoul( e, NULL, 10 ) : 0; init = 1; }
++    return pid;
++}
++
+ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class, void *info,
+                                            ULONG size, ULONG *ret_len )
+ {
+@@ -1562,6 +1570,8 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
+                             pbi.BasePriority = reply->base_priority;
+                             pbi.UniqueProcessId = reply->pid;
+                             pbi.InheritedFromUniqueProcessId = reply->ppid;
++                            if (pw_launcher_pid_u() && reply->pid == HandleToULong( NtCurrentTeb()->ClientId.UniqueProcess ))
++                                pbi.InheritedFromUniqueProcessId = pw_launcher_pid_u();
+                             if (is_old_wow64())
+                             {
+                                 if (!is_machine_64bit( reply->machine ))
+@@ -2067,6 +2077,8 @@ NTSTATUS WINAPI NtWow64QueryInformationProcess64( HANDLE handle, PROCESSINFOCLAS
+                             pbi.BasePriority = reply->base_priority;
+                             pbi.UniqueProcessId = reply->pid;
+                             pbi.InheritedFromUniqueProcessId = reply->ppid;
++                            if (pw_launcher_pid_u() && reply->pid == HandleToULong( NtCurrentTeb()->ClientId.UniqueProcess ))
++                                pbi.InheritedFromUniqueProcessId = pw_launcher_pid_u();
+                         }
+                     }
+                     SERVER_END_REQ;
+diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
+index 753e392..85da1a6 100644
+--- a/dlls/ntdll/unix/system.c
++++ b/dlls/ntdll/unix/system.c
+@@ -3328,6 +3328,14 @@ static void get_timezone_info( RTL_DYNAMIC_TIME_ZONE_INFORMATION *tzi )
+ }
+ 
+ 
++static DWORD pw_launcher_pid_u(void)
++{
++    static int init;
++    static DWORD pid;
++    if (!init) { const char *e = getenv( "PW_LAUNCHER_PID" ); pid = e ? strtoul( e, NULL, 10 ) : 0; init = 1; }
++    return pid;
++}
++
+ static unsigned int get_system_process_info( SYSTEM_INFORMATION_CLASS class, void *info, ULONG size, ULONG *len )
+ {
+     unsigned int process_count, total_thread_count, total_name_len, i, j;
+@@ -3404,6 +3412,8 @@ C_ASSERT( sizeof(struct process_info) <= sizeof(SYSTEM_PROCESS_INFORMATION) );
+             nt_process->dwBasePriority = server_process->priority;
+             nt_process->UniqueProcessId = UlongToHandle(server_process->pid);
+             nt_process->ParentProcessId = UlongToHandle(server_process->parent_pid);
++            if (pw_launcher_pid_u() && server_process->pid == HandleToULong( NtCurrentTeb()->ClientId.UniqueProcess ))
++                nt_process->ParentProcessId = UlongToHandle( pw_launcher_pid_u() );
+             nt_process->SessionId = server_process->session_id;
+             nt_process->HandleCount = server_process->handle_count;
+             get_thread_times( server_process->unix_pid, -1, &nt_process->KernelTime, &nt_process->UserTime );

@@ -1,0 +1,96 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Sun, 16 Nov 2026 13:00:00 +0100
+Subject: [PATCH] kernelbase: Answer module queries about a title's launcher helper
+ on PS5.
+
+The game cannot read the launcher helper's memory on the PS5 (EnumProcessModules returns ERROR_ACCESS_DENIED), so
+after finding the helper as its parent (ntdll change) its launcher check still fails. For the one process named by
+PW_LAUNCHER_PID, EnumProcessModulesEx returns a single module and GetModuleFileNameEx/GetModuleBaseName return the
+image in PW_LAUNCHER_IMAGE, so the game sees a real launcher without reading the helper. No cross-process memory is
+touched and the game's own modules are unchanged.
+---
+diff --git a/dlls/kernelbase/debug.c b/dlls/kernelbase/debug.c
+index a054e0d..9f4f656 100644
+--- a/dlls/kernelbase/debug.c
++++ b/dlls/kernelbase/debug.c
+@@ -1115,6 +1115,29 @@ BOOL WINAPI /* DECLSPEC_HOTPATCH */ EnumPageFilesW( PENUM_PAGE_FILE_CALLBACKW ca
+ }
+ 
+ 
++/* PS5: a game's launcher check reads its "parent" process's module path to confirm the storefront launcher. The
++ * launcher runs as the title's helper process, whose memory the game cannot read on the PS5 (ACCESS_DENIED), so the
++ * runtime answers module queries about that one process from PW_LAUNCHER_PID / PW_LAUNCHER_IMAGE, which the title sets
++ * for a [helper] identity=launcher. */
++static DWORD pw_launcher_pid(void)
++{
++    static DWORD pid = ~0u;
++    if (pid == ~0u) { char e[16]; pid = GetEnvironmentVariableA( "PW_LAUNCHER_PID", e, sizeof(e) ) - 1 < sizeof(e) - 1 ? strtoul( e, NULL, 10 ) : 0; }
++    return pid;
++}
++static const WCHAR *pw_launcher_image(void)
++{
++    static WCHAR img[MAX_PATH];
++    static int done;
++    if (!done) { done = 1; if (GetEnvironmentVariableW( L"PW_LAUNCHER_IMAGE", img, MAX_PATH ) - 1 >= MAX_PATH - 1) img[0] = 0; }
++    return img[0] ? img : NULL;
++}
++static BOOL pw_is_launcher( HANDLE process )
++{
++    DWORD pid = pw_launcher_pid();
++    return pid && process != GetCurrentProcess() && pw_launcher_image() && GetProcessId( process ) == pid;
++}
++
+ /***********************************************************************
+  *         EnumProcessModules   (kernelbase.@)
+  *         K32EnumProcessModules   (kernelbase.@)
+@@ -1199,6 +1222,13 @@ BOOL WINAPI EnumProcessModulesEx( HANDLE process, HMODULE *module, DWORD count,
+         return FALSE;
+     }
+ 
++    if (pw_is_launcher( process ))
++    {
++        if (count >= sizeof(HMODULE)) module[0] = (HMODULE)0x10000000;
++        if (needed) *needed = sizeof(HMODULE);
++        return TRUE;
++    }
++
+     if (process == GetCurrentProcess())
+     {
+         if (!(is_win64 && list_mode == LIST_MODULES_32BIT))
+@@ -1437,6 +1467,18 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetModuleBaseNameW( HANDLE process, HMODULE modul
+ {
+     BOOL wow64, found = FALSE;
+ 
++    if (pw_is_launcher( process ))
++    {
++        const WCHAR *img = pw_launcher_image(), *base = img, *p;
++        DWORD l;
++        for (p = img; *p; p++) if (*p == '\\' || *p == '/') base = p + 1;
++        l = lstrlenW( base );
++        if (size && l >= size) l = size - 1;
++        memcpy( name, base, l * sizeof(WCHAR) );
++        name[l] = 0;
++        return l;
++    }
++
+     if (!IsWow64Process( process, &wow64 )) return 0;
+ 
+     if (is_win64 && wow64)
+@@ -1545,6 +1587,16 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetModuleFileNameExW( HANDLE process, HMODULE mod
+ 
+     if (!size) return 0;
+ 
++    if (pw_is_launcher( process ))
++    {
++        const WCHAR *img = pw_launcher_image();
++        DWORD l = lstrlenW( img );
++        if (l >= size) l = size - 1;
++        memcpy( name, img, l * sizeof(WCHAR) );
++        name[l] = 0;
++        return l;
++    }
++
+     if (module)
+     {
+         if (!IsWow64Process( process, &wow64 )) return 0;

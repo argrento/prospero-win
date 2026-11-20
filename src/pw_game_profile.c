@@ -355,6 +355,11 @@ static int launcher_field(PwGameProfile *profile, const uint8_t *key, size_t key
 static int helper_field(PwGameProfile *profile, const uint8_t *key, size_t key_length,
                         const uint8_t *v, size_t n)
 {
+    if (is(key, key_length, "identity")) {
+        if (profile->helper_identity_launcher || !is(v, n, "launcher")) return PW_ERR_MALFORMED;
+        profile->helper_identity_launcher = 1;
+        return PW_OK;
+    }
     if (is(key, key_length, "wait")) {
         uint32_t seconds = 0;
         if (profile->helper_wait || !n || n > 3) return PW_ERR_MALFORMED;

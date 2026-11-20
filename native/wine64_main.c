@@ -765,6 +765,8 @@ static struct {
     char server_module[320], grant_helper[PW_TITLE_SANDBOX_PATH_SIZE + 16], log_path[320];
     char ready_path[PW_WINE_LIBRARY_PATH + PW_APP_ID_CAPACITY + PW_GAME_HELPER_PATH_CAPACITY + 16];
     int session;    /* pw_helper_start returned with the helper running: the loop may poll it (atomic) */
+    int launcher;   /* [helper] identity = launcher: the game's storefront launcher */
+    char launcher_image[64];  /* the launcher program's base name, for the game's launcher check */
 } helper_state;
 
 static void helper_log(const char *line)
@@ -792,6 +794,30 @@ static void helper_start(void)
     PS5LOG_LOG("PW_WINE64 helper status=%d pid=%d ready=%d program=%s", status, (int)helper_state.helper.pid,
                helper_state.helper.ready, helper_state.config.program);
     if (status == 0) __atomic_store_n(&helper_state.session, 1, __ATOMIC_RELEASE);
+    /* The game's launcher check (storefront games) reads its parent process's module path. The launcher runs as this
+     * helper, whose Wine pid it writes into the ready file ("ok pid=N"). Tell the game's ntdll/kernelbase (patches
+     * 1022/1023) that pid and the launcher's image name, so the unpatched game finds a launcher as its parent. */
+    if (status == 0 && helper_state.launcher && helper_state.helper.ready && helper_state.config.ready_path) {
+        FILE *rf = fopen(helper_state.config.ready_path, "r");
+        unsigned long launcher_pid = 0;
+        if (rf) {
+            char line[64] = {0};
+            if (fgets(line, sizeof line, rf)) {
+                const char *at = strstr(line, "pid=");
+                if (at) launcher_pid = strtoul(at + 4, NULL, 10);
+            }
+            fclose(rf);
+        }
+        if (launcher_pid) {
+            char pid_text[16];
+            snprintf(pid_text, sizeof pid_text, "%lu", launcher_pid);
+            setenv("PW_LAUNCHER_PID", pid_text, 1);
+            if (helper_state.launcher_image[0]) setenv("PW_LAUNCHER_IMAGE", helper_state.launcher_image, 1);
+            PS5LOG_LOG("PW_WINE64 helper launcher pid=%lu image=%s", launcher_pid, helper_state.launcher_image);
+        } else {
+            PS5LOG_LOG("PW_WINE64 helper launcher: no pid in the ready file; the launcher check is not answered");
+        }
+    }
 }
 
 /* The console's on-screen keyboard (native/pw_osk_ps5.h): a dialog still up
@@ -2898,6 +2924,13 @@ int main(int argc, char **argv)
             if (game->helper_ready[0])
                 snprintf(helper_state.ready_path, sizeof(helper_state.ready_path), "%s/drive_c/%s", prefix,
                          game->helper_ready);
+            helper_state.launcher = game->helper_identity_launcher;
+            helper_state.launcher_image[0] = 0;
+            if (game->helper_identity_launcher) {
+                const char *base = game->helper_program, *q;
+                for (q = game->helper_program; *q; q++) if (*q == '\\' || *q == '/') base = q + 1;
+                snprintf(helper_state.launcher_image, sizeof(helper_state.launcher_image), "%s", base);
+            }
             helper_state.config = (PwHelperConfig){
                 .title_id = title_id,
                 .child_path = "/app0/bdj.elf",
