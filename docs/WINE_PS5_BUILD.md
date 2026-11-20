@@ -944,6 +944,16 @@ game (PE) -> DXVK d3d11/dxgi/d3d9/d3d8/d3d10core (PE, beside the game) -> winevu
   when the window does: a context destroyed with `needs_present` set used to
   keep it, and a game that closed a window and opened another (LÖVE, through
   SDL) was refused a swapchain.
+- **Long submissions.** One AGC submission holds about a million words, and
+  each starts from reset GPU state, so RADV's PS5 winsys cuts a longer
+  submission only where RADV re-emits its state: before a draw, a dispatch
+  or, from PS5_Mesa `5693c26`, a buffer copy, fill or update. A run of small
+  buffer copies behind barriers runs through CP DMA with no draw or dispatch
+  between them; before `5693c26` a long one failed with
+  `VK_ERROR_DEVICE_LOST` ("a submission holds more words between two splits
+  than one AGC submission can"). Order of the Sinking Star (vkd3d-proton)
+  records about 75,000 of them in its first frame and stayed on a gray
+  screen.
 - **DLLs.** DXVK's DLLs go beside the game, and its profile sets
   `dll_overrides` (`d3d11,dxgi=n`, `d3d9=n`, `d3d8,d3d9=n` or
   `d3d10core,d3d11,dxgi=n`). The unmodified Win32-WSI DXVK build is the one
