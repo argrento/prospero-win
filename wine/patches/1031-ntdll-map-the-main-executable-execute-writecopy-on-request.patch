@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Thu, 19 Nov 2026 22:30:00 +0100
+Subject: [PATCH] ntdll: Map the main executable execute-writecopy on request.
+
+Some protected games check, before their entry point, that every page of
+their own image can be written and executed, and take a different code
+path when it can't. Wine gives each section its own protection
+(read-only, writecopy, execute-read), so such a game sees read-only pages
+there. CrossOver maps the same image as one execute-writecopy region.
+
+With PW_IMAGE_WRITECOPY_EXEC=1 the loader sets the main executable's
+whole image to PAGE_EXECUTE_WRITECOPY once its imports are resolved, before
+any DLL or the game runs. DLLs keep their section protections.
+---
+ dlls/ntdll/loader.c | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -4566,6 +4566,27 @@
+     return !wcsnicmp( name, wow64_drivers, wcslen(wow64_drivers) );
+ }
+ 
++/* PW_IMAGE_WRITECOPY_EXEC=1: the main executable's whole image is execute-writecopy,
++ * as CrossOver maps it: every page of the image reports PAGE_EXECUTE_WRITECOPY. */
++static void set_main_image_writecopy_exec( WINE_MODREF *wm )
++{
++    WCHAR value[2];
++    SIZE_T len, size;
++    void *addr;
++    ULONG old;
++    NTSTATUS status;
++
++    if (RtlQueryEnvironmentVariable( NULL, L"PW_IMAGE_WRITECOPY_EXEC", 23, value, 1, &len ) ||
++        len != 1 || value[0] != '1')
++        return;
++    addr = wm->ldr.DllBase;
++    size = wm->ldr.SizeOfImage;
++    status = NtProtectVirtualMemory( NtCurrentProcess(), &addr, &size, PAGE_EXECUTE_WRITECOPY, &old );
++    if (status) ERR( "image %p size %#Ix: execute-writecopy failed %#lx\n", wm->ldr.DllBase, size, status );
++    else TRACE( "image %p size %#Ix: execute-writecopy\n", addr, size );
++}
++
++
+ /******************************************************************
+  *		loader_init
+  *
+@@ -4657,6 +4678,7 @@
+             NtTerminateProcess( GetCurrentProcess(), status );
+         }
+         imports_fixup_done = TRUE;
++        set_main_image_writecopy_exec( wm );
+     }
+     else
+     {
+-- 
+2.43.0

@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Thu, 19 Nov 2026 01:00:00 +0100
+Subject: [PATCH] ntdll: Name the load address in a relocated image's header.
+
+On Windows the mapped header of a relocated module holds the address it
+was loaded at. Wine writes the dynamic base it picked into the header
+before it maps the image; when that base can't be mapped, the image goes
+elsewhere and the loader relocates it a second time, but the header keeps
+naming the first base. Code that finds its own image through the header
+then reads the wrong one.
+
+With PW_IMAGE_HEADER_BASE=1 the loader writes the address it relocated an
+image to into the image's header.
+---
+ dlls/ntdll/loader.c | 31 +++++++++++++++++++++++++++++++
+ 1 file changed, 31 insertions(+)
+
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index db481583aa..a0bb5d1b54 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -2174,6 +2174,32 @@
+ }
+ 
+ 
++/* PW_IMAGE_HEADER_BASE=1: a relocated image's header names the address it was
++ * relocated to, as on Windows, where the mapped header of a relocated module
++ * holds its load address. */
++static BOOL image_header_base_enabled(void)
++{
++    static int enabled = -1;
++    WCHAR value[2];
++    SIZE_T len;
++
++    if (enabled < 0)
++        enabled = !RtlQueryEnvironmentVariable( NULL, L"PW_IMAGE_HEADER_BASE", 20, value, 1, &len ) &&
++                  len == 1 && value[0] == '1';
++    return enabled;
++}
++
++static void set_image_header_base( void *module, IMAGE_NT_HEADERS *nt )
++{
++    void *addr = &nt->OptionalHeader.ImageBase;
++    SIZE_T size = sizeof(nt->OptionalHeader.ImageBase);
++    ULONG old;
++
++    if (NtProtectVirtualMemory( NtCurrentProcess(), &addr, &size, PAGE_READWRITE, &old )) return;
++    nt->OptionalHeader.ImageBase = (ULONG_PTR)module;
++    NtProtectVirtualMemory( NtCurrentProcess(), &addr, &size, old, &old );
++}
++
+ static NTSTATUS perform_relocations( void *module, IMAGE_NT_HEADERS *nt, SIZE_T len )
+ {
+     char *base;
+@@ -2252,6 +2278,11 @@
+         NtProtectVirtualMemory( NtCurrentProcess(), &addr,
+                                 &size, protect_old[i], &protect_old[i] );
+     }
++    if (image_header_base_enabled())
++    {
++        TRACE( "header image base %p -> %p\n", base, module );
++        set_image_header_base( module, nt );
++    }
+ 
+ done:
+     RtlFreeHeap( GetProcessHeap(), 0, protect_old );
