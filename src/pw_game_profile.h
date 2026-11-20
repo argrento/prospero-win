@@ -159,8 +159,9 @@
  * controller input, keys, the mouse or nothing, and lines such as
  *   cross = key:ctrl+s     r2 = mouse:left      r2_threshold = 30
  *   left_stick = keys      left_stick_keys = w,s,a,d
- * replace the button lines above, preset, mouse and mouse_speed. Not in an
- * input preset file or in [launcher], which keep the old lines.
+ * replace the button lines above, preset, mouse and mouse_speed. [launcher]
+ * takes a map the same way (capability launcher-map); an input preset file
+ * keeps the old lines.
  */
 #include "pw_app_profile.h"
 #include "pw_steam_view.h"

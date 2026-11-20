@@ -461,7 +461,7 @@ static int map_shared_line(const uint8_t *key, size_t key_length, const uint8_t 
 }
 
 static int input_field(PwGameInput *input, const uint8_t *key, size_t key_length,
-                       const uint8_t *v, size_t n, int allow_preset)
+                       const uint8_t *v, size_t n, int allow_preset, int allow_map)
 {
     const int shared = is(key, key_length, "mode") || is(key, key_length, "rumble") || is(key, key_length, "player2");
 
@@ -471,12 +471,12 @@ static int input_field(PwGameInput *input, const uint8_t *key, size_t key_length
         if (input->map.on) return PW_ERR_MALFORMED;
         input->map.seen |= 1ull << MAP_SEEN_LOOSE;
     }
-    /* map = 1: in the profile's own [input], before any button line,
-     * preset, mouse or mouse_speed (docs/INPUT_MAP.md). */
+    /* map = 1: in the profile's own [input] or [launcher], before any
+     * button line, preset, mouse or mouse_speed (docs/INPUT_MAP.md). */
     if (same(key, key_length, "map")) {
         int bound = 0;
         for (size_t i = 0; i < PW_GAME_BUTTON_COUNT; i++) bound |= input->bindings[i].kind != PW_GAME_BIND_UNSET;
-        if (!allow_preset || input->map.on || bound || (input->set & (SET_PRESET | SET_MOUSE | SET_SPEED)) ||
+        if (!allow_map || input->map.on || bound || (input->set & (SET_PRESET | SET_MOUSE | SET_SPEED)) ||
             (input->map.seen & (1ull << MAP_SEEN_LOOSE)) || !same(v, n, "1"))
             return PW_ERR_MALFORMED;
         input->map.on = 1;
@@ -712,7 +712,7 @@ static int launcher_field(PwGameProfile *profile, const uint8_t *key, size_t key
         profile->launcher_chain_off = 1;
         return PW_OK;
     }
-    if (!label) return input_field(&profile->launcher_input, key, key_length, v, n, 0);
+    if (!label) return input_field(&profile->launcher_input, key, key_length, v, n, 0, 1);
     if (label[0] || !n || n >= PW_GAME_LABEL_CAPACITY) return PW_ERR_MALFORMED;
     for (size_t i = 0; i < n; i++)
         if (!((v[i] >= 'a' && v[i] <= 'z') || (v[i] >= 'A' && v[i] <= 'Z') || (v[i] >= '0' && v[i] <= '9') ||
@@ -1036,7 +1036,7 @@ static int parse_sections(const uint8_t *bytes, size_t length, PwGameProfile *pr
             display_field(&profile->display, &display_seen, begin, (size_t)(key_end - begin),
                           value, (size_t)(end - value)) :
             input_field(input_only ? input_only : &profile->input, begin,
-                        (size_t)(key_end - begin), value, (size_t)(end - value), !input_only);
+                        (size_t)(key_end - begin), value, (size_t)(end - value), !input_only, !input_only);
         if (status != PW_OK) return status;
     }
     if (input_only ? !(seen_sections & (1u << SECTION_INPUT)) :
@@ -1239,6 +1239,7 @@ int pw_game_profile_parse(const uint8_t *bytes, size_t length, PwGameProfile *pr
     if ((status = pw_app_profile_parse(bytes, application_end, &parsed.app)) != PW_OK)
         return status;
     if (parsed.input.map.on && (status = map_finish(&parsed.input.map)) != PW_OK) return status;
+    if (parsed.launcher_input.map.on && (status = map_finish(&parsed.launcher_input.map)) != PW_OK) return status;
     /* show_fps and menu set the HUD variable themselves (pw_game_graphics_env). */
     for (size_t i = 0; (parsed.display.show_fps || parsed.display.menu) && i < parsed.debug_env_count; i++)
         if (!strcmp(parsed.debug_env[i].name, "DXVK_HUD") || !strcmp(parsed.debug_env[i].name, "GALLIUM_HUD"))

@@ -1069,7 +1069,11 @@ static void test_input_map(void)
         "[input]\npreset = gamepad\nmap = 1\n", "[input]\nmouse = left_stick\nmap = 1\n",
         "[input]\nmouse_speed = 900\nmap = 1\n", "[input]\nleft_stick = keys\nmap = 1\n",
         "[input]\nmap = 1\npreset = gamepad\n", "[input]\nmap = 1\nmouse = none\n",
-        "[input]\nmap = 1\nmouse_speed = 900\n", "[launcher]\nmap = 1\n",
+        "[input]\nmap = 1\nmouse_speed = 900\n",
+        /* [launcher] takes a map as strictly as [input] */
+        "[launcher]\ncross = space\nmap = 1\n", "[launcher]\nmouse = left_stick\nmap = 1\n", "[launcher]\nmap = 1\nmap = 1\n",
+        "[launcher]\nmap = 1\nmouse = left_stick\n", "[launcher]\nmap = 1\npreset = mouse\n", "[launcher]\nmap = 1\ncross = z\n",
+        "[launcher]\nmap = 1\nmode = KEYBOARD\n", "[launcher]\nmap = 1\nleft_stick_speed = 900\n",
         /* the lines it keeps are as strict as its own, before it as well as after */
         "[input]\nmap = 1\nMODE = KEYBOARD\n", "[input]\nmap = 1\nmode = KEYBOARD\n", "[input]\nmap = 1\nMode = keyboard\n",
         "[input]\nmap = 1\nrumble = 050\n", "[input]\nmap = 1\nRUMBLE = 50\n", "[input]\nmap = 1\nPlayer2 = p2\n",
@@ -1142,6 +1146,15 @@ static void test_input_map(void)
     }
     assert(parse(APP "[input]\nleft_stick = keys\n", &p) != PW_OK);
     assert(parse(APP "[input]\ntouchpad_left = z\n", &p) != PW_OK);
+    /* [launcher] takes its own map: the touchpad hold swaps a layout for another one, and either side's mode */
+    assert(parse(APP "[input]\nmode = xinput\nmap = 1\ncross = pad:b\n[launcher]\nchain = off\nlabel = Menus\n"
+                 "game_label = Custom\nmode = keyboard\nmap = 1\ncross = mouse:left\nleft_stick = mouse\n"
+                 "left_stick_speed = 900\n", &p) == PW_OK &&
+           p.input.map.on && p.launcher_input.map.on && p.launcher_chain_off &&
+           p.launcher_input.mode == PW_GAME_INPUT_KEYBOARD && !strcmp(p.launcher_label, "Menus"));
+    /* and beside the old lines in [input] too */
+    assert(parse(APP "[input]\nmode = xinput\ncross = space\n[launcher]\nchain = off\nmap = 1\ncross = key:enter\n", &p) ==
+               PW_OK && !p.input.map.on && p.launcher_input.map.on);
     /* [launcher] keeps the old lines beside a mapped [input] */
     assert(parse(APP "[input]\nmode = xinput\nmap = 1\ncross = pad:b\n[launcher]\nmode = keyboard\nmouse = left_stick\n"
                  "cross = mouse_left\n", &p) == PW_OK && p.input.map.on && !p.launcher_input.map.on &&

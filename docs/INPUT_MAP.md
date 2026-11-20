@@ -35,11 +35,12 @@ right_stick_speed = 1500
 
 ## Where the lines go
 
-- `map = 1` goes in the profile's own `[input]` section. The only value is
-  `1`. To turn the map off, leave the line out.
+- `map = 1` goes in the profile's own `[input]` section, or in `[launcher]`
+  (below). The only value is `1`. To turn the map off, leave the line out.
 - `map = 1` comes before every input line and tuning line (below). An input
   line before it is read as an old-style line, and the profile is refused.
-- These keys keep their meaning with `map = 1`: `mode`, `rumble`, `player2`.
+- These keys keep their meaning with `map = 1`: `mode`, `rumble`, and in
+  `[input]` only, `player2`.
   In a section with `map = 1` they are written as strictly as the map's own
   lines (below), before `map = 1` as well as after it: `MODE = KEYBOARD` or
   `rumble = 050` refuses the profile.
@@ -48,9 +49,12 @@ right_stick_speed = 1500
 - An old-style button value (`cross = z`, `r2 = mouse_left`, `vk:0x41`
   without `key:`) is refused with `map = 1`. Every target has the form given
   under [Targets](#targets); `none` is written the same in both grammars.
-- `map = 1` is refused in an input preset file and in `[launcher]`. Those
-  keep the old grammar. When the touchpad hold or a launcher swaps to the
-  `[launcher]` preset, the map is off until it swaps back.
+- `map = 1` is refused in an input preset file, which keeps the old grammar.
+  `[launcher]` takes either grammar: its own `map = 1` and lines, with the
+  same rules as `[input]` (without `player2`), or the old lines (kits that read a map there list
+  the `launcher-map` capability). When the touchpad hold or a launcher swaps
+  to the `[launcher]` input, its map (or its old lines) plays until it swaps
+  back, and `[input]`'s map plays again after.
 - Each key comes once. Keys and values are lower case. A number has no
   leading zero (`16`, not `016`), and a value has no space inside it
   (`w,s,a,d`, not `w, s, a, d`; `key:ctrl+s`, not `key:ctrl + s`).

@@ -1339,7 +1339,7 @@ static int helper_message(const char *text)
 
 static void input_switch_notify(const char *label)
 {
-    int rc = title_notify("Controller preset: ", label[0] ? label : "switched");
+    int rc = title_notify("Controls: ", label[0] ? label : "switched");
 
     PS5LOG_LOG("PW_WINE64 input switch to=%s notify=%d", label[0] ? label : "-", rc);
 }
