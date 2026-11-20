@@ -8,7 +8,10 @@ being stepped over (0986); writes that keep coming beside a code page are not
 reported to the program (0987); a file read into a page beside a protected one
 succeeds, also when it starts in a host page nobody protected, and so does a
 datagram received there (0988); hot writes are reported only with PW_SUBPAGE_REPORT=1 (0989);
-a page decommitted beside a protected one is cleared, also when it is protected too (0975).
+a page decommitted beside a protected one is cleared, also when it is protected too (0975);
+a write to a write-watched page beside a read-only one ends, before and after a reset (1033);
+a movs from a host page beside an inaccessible page into one beside a read-only page ends unseen (1034);
+accesses to a page while another thread keeps protecting and unprotecting the page beside it never fault (1035).
 
 Needs the host Wine from tools/build_host_wine.sh (PROSPERO_HOST_WINE, default
 .deps/wine-host/install/usr/bin/wine) and the mingw compilers; without them
@@ -36,8 +39,9 @@ def main() -> int:
         print("wine subpage protect skipped: needs the host Wine and the mingw compilers")
         return 0
     with tempfile.TemporaryDirectory() as directory:
+        # PW_SUBPAGE_FIXES=1 turns on 1033-1035, which the write-watch, movs and retry cases need (1036)
         env = dict(os.environ, WINEPREFIX=str(Path(directory) / "pfx"), WINEDEBUG="-all",
-                   WINEDLLOVERRIDES="winemenubuilder.exe=d")
+                   WINEDLLOVERRIDES="winemenubuilder.exe=d", PW_SUBPAGE_FIXES="1")
         env.pop("WINE_HOST_PAGE_SIZE", None)  # the native run keeps the PC's own host pages
         env.pop("PW_SUBPAGE_REPORT", None)
         for compiler in compilers:

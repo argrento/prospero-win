@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Sun, 15 Nov 2026 09:21:27 +0100
+Subject: [PATCH] ntdll: Run a write-watched write beside a protected page
+ again only when its host page is writable.
+
+A write to a write-watched page clears the watch on its host page and
+is run again when the host page is writable now. That was judged by
+the union of its pages' protections. With 16 KiB host pages and a
+read-only or inaccessible page in the same host page (patch 0974), the
+host page stays without write access, so the write faulted again, was
+run again, and so on forever, the program seeing nothing. The Mario
+Kart World PC port, which keeps its guest memory write-watched and
+makes code pages read-only, hung on the PS5 at about 180,000 faults a
+second on one page.
+
+The host page protection Wine actually set now decides. When it is
+still not writable, the fault goes on to the step over the neighbour
+that other writes beside a protected page already take.
+---
+ dlls/ntdll/unix/virtual.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 5c6e1013f3..24ff50c9c2 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -5425,8 +5425,9 @@ NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec,
+                 mprotect_range( page, host_page_size, 0, 0 );
+             }
+         }
+-        /* ignore fault if page is writable now */
+-        if (get_unix_prot( get_host_page_vprot( page )) & PROT_WRITE)
++        /* ignore fault if the host page is writable now: not only by the union of its
++         * pages, which a read-only or inaccessible neighbour can keep from it */
++        if (get_host_page_unix_prot( page, NULL, NULL, 0, 0 ) & PROT_WRITE)
+         {
+             if ((vprot & VPROT_WRITEWATCH) || is_write_watch_range( page, 1 ))
+                 ret = STATUS_SUCCESS;

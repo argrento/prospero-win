@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Fri, 20 Nov 2026 11:00:00 +0100
+Subject: [PATCH] ntdll: Turn on the sub-page fixes on request on PS5.
+
+Patches 1033, 1034 and 1035 change how a fault beside a protected page is
+handled: a write-watched write is run again only when the real host page is
+writable, one step can open up to four host pages, and an access whose host
+page another thread opened is run again. With PW_SUBPAGE_FIXES=1 they apply;
+without it the fault handler behaves as before them: the union of the
+pages' protections decides, a thread steps over one host page at a time, and
+an access is run again only when the host page was kept whole.
+---
+ dlls/ntdll/unix/virtual.c | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+--- a/dlls/ntdll/unix/virtual.c	2026-11-20 10:50:22
++++ b/dlls/ntdll/unix/virtual.c	2026-11-20 10:51:01
+@@ -1533,6 +1533,8 @@
+ /* PW_SUBPAGE_REPORT=1: hot writes beside a read-only data page are reported to the
+  * program (subpage_hot), for emulators that drop recompiled code when told. */
+ static BOOL subpage_report;
++/* PW_SUBPAGE_FIXES=1: patches 1033-1035 (write-watched writes, two host pages per step, retry) */
++static BOOL subpage_fixes;
+ 
+ /***********************************************************************
+  *           subpage_forget
+@@ -4323,6 +4325,10 @@
+         const char *env = getenv( "PW_SUBPAGE_REPORT" );
+         subpage_report = env && !strcmp( env, "1" );
+     }
++    {
++        const char *env = getenv( "PW_SUBPAGE_FIXES" );
++        subpage_fixes = env && !strcmp( env, "1" );
++    }
+ 
+ #ifdef _WIN64
+     host_addr_space_limit = get_host_addr_space_limit();
+@@ -5444,7 +5450,8 @@
+         }
+         /* ignore fault if the host page is writable now: not only by the union of its
+          * pages, which a read-only or inaccessible neighbour can keep from it */
+-        if (get_host_page_unix_prot( page, NULL, NULL, 0, 0 ) & PROT_WRITE)
++        if ((subpage_fixes ? get_host_page_unix_prot( page, NULL, NULL, 0, 0 )
++                           : get_unix_prot( get_host_page_vprot( page ))) & PROT_WRITE)
+         {
+             if ((vprot & VPROT_WRITEWATCH) || is_write_watch_range( page, 1 ))
+                 ret = STATUS_SUCCESS;
+@@ -5456,7 +5463,9 @@
+      * pages opened, as a movs that reads one and writes the other: the second is opened
+      * beside the first, and the step closes both. */
+     if (ret == STATUS_ACCESS_VIOLATION && host_page_size != page_size &&
+-        (step = subpage_step_slot( data, page )) < ARRAY_SIZE(data->subpage_step))
++        (step = subpage_fixes ? subpage_step_slot( data, page )
++                              : (!data->subpage_step[0] || data->subpage_step[0] == page)
++                                    ? 0 : ARRAY_SIZE(data->subpage_step)) < ARRAY_SIZE(data->subpage_step))
+     {
+         /* The page itself allows the access and the host page only refuses it for a
+          * neighbour's sake: open the host page for one instruction, and close it
+@@ -5471,7 +5480,7 @@
+         {
+             /* Another thread changed a protection in the host page, or kept it whole, while
+              * this access faulted: the host page allows the access now, so it runs again. */
+-            ret = STATUS_SUCCESS;
++            if (subpage_fixes || subpage_whole( page )) ret = STATUS_SUCCESS;
+         }
+         else if (subpage_hot( page, err == EXCEPTION_WRITE_FAULT, &protected_page ))
+         {
+-- 
+2.43.0

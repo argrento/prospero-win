@@ -818,6 +818,10 @@ wine/patches/1019-server-ps5-watch-many-directories.patch
 wine/patches/1020-ntdll-report-the-commit-limit-when-the-host-cannot-commit.patch
 wine/patches/1021-server-ps5-park-files-opened-for-writing.patch
 wine/patches/1028-ntdll-read-the-locale-environment-by-category-without-c-library-locales.patch
+wine/patches/1033-ntdll-run-a-write-watched-write-beside-a-protected-page-again-only-when-writable.patch
+wine/patches/1034-ntdll-step-over-an-instruction-that-needs-two-host-pages-opened.patch
+wine/patches/1035-ntdll-run-again-an-access-whose-host-page-another-thread-opened.patch
+wine/patches/1036-ntdll-ps5-turn-on-the-sub-page-fixes-on-request.patch
 wine/ps5/pw_nsiproxy_libc.c
 tests/test_pw_nsiproxy_libc.c
 wine/patches/0985-ntdll-ps5-start-hosted-drivers-without-thread-attach.patch

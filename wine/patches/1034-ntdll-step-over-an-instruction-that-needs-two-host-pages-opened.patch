@@ -1,0 +1,127 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Sun, 15 Nov 2026 10:20:00 +0100
+Subject: [PATCH] ntdll: Step over an instruction that needs two host pages
+ opened.
+
+Patch 0974 steps over an access that faults only because a neighbour in
+its host page is protected: it opens the host page, runs the instruction
+with the trap flag set, and closes the page on the trap. A thread had
+one such page at a time. An instruction that touches two host pages
+that both need opening, as a movs that reads one and writes the other,
+faulted on the second while the first was open; that fault went to the
+program as an access violation on a page it can write. A program that
+handles access violations by making the page writable and running the
+instruction again (the Mario Kart World PC port, on its guest memory)
+then looped at about 92,000 faults a second in memcpy.
+
+A thread now keeps up to four host pages open for one instruction, and
+the trap closes them all.
+---
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -125,7 +125,7 @@
+     unsigned int ps5_mutex_token; /* occupies the padding before ps5_sleep_asked on x86_64 */
+ #endif
+     LONGLONG     ps5_sleep_asked;   /* microseconds of sleep asked since then */
+-    void        *subpage_step;      /* host page to close again after a single step (virtual_handle_fault) */
++    void        *subpage_step[4];   /* host pages to close again after a single step (virtual_handle_fault) */
+     char         debug_info[0x800]; /* debug_info structure */
+     char         signal_stack[];    /* signal stack */
+     /* char kernel_stack[] */
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2665,7 +2665,7 @@
+             check_invalid_gsbase( data, sigcontext ))
+         {
+             /* a neighbour's protection only: run the instruction, then close the host page */
+-            if (data->subpage_step) EFL_sig(sigcontext) |= 0x100;
++            if (data->subpage_step[0]) EFL_sig(sigcontext) |= 0x100;
+             leave_handler( data, sigcontext );
+             return;
+         }
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -5373,6 +5373,22 @@
+ 
+ 
+ /***********************************************************************
++ *           subpage_step_slot
++ *
++ * Where the host page goes among those a thread is stepping over: its own slot when
++ * it is there already, else the first free one; ARRAY_SIZE when all are taken.
++ */
++static unsigned int subpage_step_slot( struct thread_data *data, const char *page )
++{
++    unsigned int i;
++
++    for (i = 0; i < ARRAY_SIZE(data->subpage_step); i++)
++        if (!data->subpage_step[i] || data->subpage_step[i] == page) return i;
++    return i;
++}
++
++
++/***********************************************************************
+  *           virtual_handle_fault
+  */
+ NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec, void *stack )
+@@ -5382,6 +5398,7 @@
+     void *addr = (void *)rec->ExceptionInformation[1];
+     char *page = ROUND_ADDR( addr, host_page_mask );
+     struct thread_stack_info stack_info;
++    unsigned int step;
+     BYTE vprot;
+ 
+     mutex_lock( &virtual_mutex );  /* no need for signal masking inside signal handler */
+@@ -5435,9 +5452,11 @@
+     }
+     /* A thread can fault again on the host page it is stepping over when another thread
+      * protects that page again first (restore_write_access, virtual_subpage_step_done):
+-     * it is opened again for the same instruction. */
++     * it is opened again for the same instruction. One instruction can also need two host
++     * pages opened, as a movs that reads one and writes the other: the second is opened
++     * beside the first, and the step closes both. */
+     if (ret == STATUS_ACCESS_VIOLATION && host_page_size != page_size &&
+-        (!data->subpage_step || data->subpage_step == page))
++        (step = subpage_step_slot( data, page )) < ARRAY_SIZE(data->subpage_step))
+     {
+         /* The page itself allows the access and the host page only refuses it for a
+          * neighbour's sake: open the host page for one instruction, and close it
+@@ -5466,7 +5485,7 @@
+         }
+         else if (!mprotect_exec( page, host_page_size, get_unix_prot( get_host_page_vprot( page ) ) ))
+         {
+-            data->subpage_step = page;
++            data->subpage_step[step] = page;
+             ret = STATUS_SUCCESS;
+         }
+     }
+@@ -5480,17 +5499,20 @@
+ /***********************************************************************
+  *           virtual_subpage_step_done
+  *
+- * Called on the single step after virtual_handle_fault opened a host page for
+- * one instruction: closes it again. Returns FALSE when no step was pending.
++ * Called on the single step after virtual_handle_fault opened host pages for
++ * one instruction: closes them again. Returns FALSE when no step was pending.
+  */
+ BOOL virtual_subpage_step_done( struct thread_data *data )
+ {
+-    char *page = data->subpage_step;
++    unsigned int i;
+ 
+-    if (!page) return FALSE;
++    if (!data->subpage_step[0]) return FALSE;
+     mutex_lock( &virtual_mutex );  /* no need for signal masking inside signal handler */
+-    mprotect_range( page, host_page_size, 0, 0 );
+-    data->subpage_step = NULL;
++    for (i = 0; i < ARRAY_SIZE(data->subpage_step) && data->subpage_step[i]; i++)
++    {
++        mprotect_range( data->subpage_step[i], host_page_size, 0, 0 );
++        data->subpage_step[i] = NULL;
++    }
+     mutex_unlock( &virtual_mutex );
+     return TRUE;
+ }
+-- 
+2.43.0

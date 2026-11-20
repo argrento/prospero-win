@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Sun, 15 Nov 2026 23:00:00 +0100
+Subject: [PATCH] ntdll: Run again an access whose host page another thread
+ opened.
+
+With host pages larger than Windows pages, an access to a page that
+allows it faults when another page in its host page is protected. When
+another thread changes a protection in that host page before the fault
+is handled, so that the host page allows the access by the time the
+handler looks, the access was raised to the program as an access
+violation, unless the host page had been kept whole (patch 0986). A
+program that protects and unprotects one page while its threads use the
+pages beside it saw access violations on memory it can read and write.
+
+The access now runs again whenever the host page allows it.
+---
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 4bd4342..f2cef72 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -5469,8 +5469,9 @@ NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec,
+             ;
+         else if (get_host_page_unix_prot( page, NULL, NULL, 0, 0 ) & need)
+         {
+-            /* another thread kept the host page whole while this access faulted */
+-            if (subpage_whole( page )) ret = STATUS_SUCCESS;
++            /* Another thread changed a protection in the host page, or kept it whole, while
++             * this access faulted: the host page allows the access now, so it runs again. */
++            ret = STATUS_SUCCESS;
+         }
+         else if (subpage_hot( page, err == EXCEPTION_WRITE_FAULT, &protected_page ))
+         {
+-- 
+2.43.0

@@ -32,13 +32,18 @@ static LONG CALLBACK handler(EXCEPTION_POINTERS *info)
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
-static int protect(int page, DWORD prot)
+static int protect_at(unsigned char *page, DWORD prot)
 {
     DWORD old;
 
-    if (VirtualProtect(base + page * PAGE, PAGE, prot, &old)) return 1;
-    printf("subpage protect %d %#lx failed %lu\n", page, prot, GetLastError());
+    if (VirtualProtect(page, PAGE, prot, &old)) return 1;
+    printf("subpage protect %p %#lx failed %lu\n", page, prot, GetLastError());
     return 0;
+}
+
+static int protect(int page, DWORD prot)
+{
+    return protect_at(base + page * PAGE, prot);
 }
 
 /* Reads PAGE bytes of a file into a page, as a game loads its data: the kernel
@@ -89,6 +94,173 @@ static int expect(const char *what, LONG got, LONG want)
 {
     printf("subpage %s: %ld fault(s), expected %ld\n", what, got, want);
     return got == want;
+}
+
+static volatile unsigned char *watch_byte;
+
+static DWORD WINAPI write_watch_byte(void *arg)
+{
+    *watch_byte = (unsigned char)(UINT_PTR)arg;
+    return 0;
+}
+
+/* Writes one byte in another thread and waits for it: a write Wine keeps
+ * faulting on, without the program seeing it, never ends. */
+static int write_in_time(volatile unsigned char *where, unsigned char value)
+{
+    HANDLE thread;
+    DWORD wait;
+
+    watch_byte = where;
+    thread = CreateThread(NULL, 0, write_watch_byte, (void *)(UINT_PTR)value, 0, NULL);
+    if (!thread) return 0;
+    wait = WaitForSingleObject(thread, 5000);
+    CloseHandle(thread);
+    if (wait == WAIT_OBJECT_0) return *where == value;
+    printf("subpage write-watch write did not end\nsubpage verdict=fail\n");
+    fflush(stdout);
+    TerminateProcess(GetCurrentProcess(), 1);
+    return 0;
+}
+
+static unsigned char *copy_from, *copy_to;
+
+static DWORD WINAPI copy_bytes(void *arg)
+{
+    void *to = copy_to, *from = copy_from;
+    SIZE_T count = 8;
+
+    (void)arg;
+    __asm__ __volatile__("rep movsb" : "+D"(to), "+S"(from), "+c"(count) : : "memory");
+    return 0;
+}
+
+/* Copies with one instruction (movs, as memcpy's tail) from a page beside an
+ * inaccessible one to a page beside a read-only one, in two host pages that both
+ * need opening for it: the copy ends and the program sees no fault. */
+static int copy_between_host_pages(void)
+{
+    unsigned char *memory = VirtualAlloc(NULL, 16 * PAGE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    unsigned char *saved = base;
+    HANDLE thread;
+    DWORD wait;
+    LONG got;
+    int ok = memory != NULL;
+
+    if (ok) memset(memory + PAGE, 'm', 8);
+    ok = ok && protect_at(memory, PAGE_NOACCESS) && protect_at(memory + 4 * PAGE, PAGE_READONLY);
+    if (!ok) return 0;
+    base = memory;  /* the handler counts faults in this allocation */
+    copy_from = memory + PAGE;
+    copy_to = memory + 5 * PAGE;
+    got = faults;
+    thread = CreateThread(NULL, 0, copy_bytes, NULL, 0, NULL);
+    wait = thread ? WaitForSingleObject(thread, 5000) : WAIT_FAILED;
+    if (thread) CloseHandle(thread);
+    if (wait != WAIT_OBJECT_0)
+    {
+        printf("subpage copy between host pages did not end\nsubpage verdict=fail\n");
+        fflush(stdout);
+        TerminateProcess(GetCurrentProcess(), 1);
+    }
+    ok = expect("copy between two host pages beside protected pages", faults - got, 0) &&
+         !memcmp(memory + 5 * PAGE, "mmmmmmmm", 8);
+    base = saved;
+    VirtualFree(memory, 0, MEM_RELEASE);
+    return ok;
+}
+
+/* Whether GetWriteWatch lists the page, and only pages of its host page. */
+static int watched(unsigned char *memory, int page)
+{
+    void *pages[16];
+    ULONG_PTR count = sizeof(pages) / sizeof(pages[0]), i;
+    ULONG granularity;
+    int found = 0;
+
+    if (GetWriteWatch(0, memory, 16 * PAGE, pages, &count, &granularity)) return 0;
+    for (i = 0; i < count; i++)
+    {
+        if ((unsigned char *)pages[i] == memory + page * PAGE) found = 1;
+        else if (((unsigned char *)pages[i] - memory) / (4 * PAGE) != page / 4) return 0;
+    }
+    return found;
+}
+
+/* Writes to a writable page of a write-watched allocation beside a read-only page,
+ * as a game that compiles another console's code into its memory and makes the
+ * code pages read-only: the write ends and is listed, before and after a reset,
+ * and a write to the read-only page still faults. */
+static int write_watch_beside(void)
+{
+    unsigned char *memory = VirtualAlloc(NULL, 16 * PAGE, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_READWRITE);
+    unsigned char *saved = base;
+    LONG got;
+    int ok = memory != NULL;
+
+    ok = ok && protect_at(memory + PAGE, PAGE_READONLY);
+    got = faults;
+    ok = ok && write_in_time(memory + 123, 1) && watched(memory, 0);
+    ok = ok && !ResetWriteWatch(memory, 16 * PAGE);
+    ok = ok && write_in_time(memory + 2 * PAGE + 123, 2) && watched(memory, 2);
+    ok = ok && expect("write-watched writes beside a read-only page", faults - got, 0);
+    base = memory;  /* the handler takes faults in this allocation */
+    got = faults;
+    ok = ok && write_in_time(memory + PAGE + 123, 3);
+    ok = ok && expect("write-watched write to the read-only page", faults - got, 1) && fault_page == 1 && fault_write;
+    base = saved;
+    if (memory) VirtualFree(memory, 0, MEM_RELEASE);
+    return ok;
+}
+
+static volatile LONG toggling;
+static unsigned char *toggle_memory;
+
+static DWORD WINAPI toggle_neighbour(void *arg)
+{
+    DWORD old;
+
+    (void)arg;
+    while (toggling)
+    {
+        VirtualProtect(toggle_memory, PAGE, PAGE_NOACCESS, &old);
+        VirtualProtect(toggle_memory, PAGE, PAGE_READWRITE, &old);
+    }
+    return 0;
+}
+
+/* Reads and writes of a page while another thread keeps protecting and unprotecting the
+ * page beside it, as a program that guards its own memory: a fault that finds the host
+ * page opened by the other thread meanwhile is retried, never raised. */
+static int accesses_while_neighbour_changes(void)
+{
+    unsigned char *memory = VirtualAlloc(NULL, 16 * PAGE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    unsigned char *saved = base;
+    HANDLE thread;
+    LONG got;
+    int i, ok = memory != NULL;
+
+    if (!ok) return 0;
+    base = memory;
+    toggle_memory = memory;
+    toggling = 1;
+    got = faults;
+    thread = CreateThread(NULL, 0, toggle_neighbour, NULL, 0, NULL);
+    for (i = 0; i < 200000; i++)
+    {
+        ((volatile unsigned char *)memory)[PAGE + (i & 4095)] = (unsigned char)i;
+        (void)((volatile unsigned char *)memory)[2 * PAGE + (i & 4095)];
+    }
+    toggling = 0;
+    if (thread)
+    {
+        WaitForSingleObject(thread, 5000);
+        CloseHandle(thread);
+    }
+    ok = expect("accesses while the neighbour's protection changes", faults - got, 0) && thread;
+    base = saved;
+    VirtualFree(memory, 0, MEM_RELEASE);
+    return ok;
 }
 
 int main(void)
@@ -247,6 +419,10 @@ int main(void)
     ok = decommit_beside("read-only beside inaccessible", PAGE_NOACCESS, PAGE_READONLY, 1) && ok;
     ok = decommit_beside("inaccessible beside inaccessible", PAGE_NOACCESS, PAGE_NOACCESS, 1) && ok;
     ok = decommit_beside("inaccessible beside writable", PAGE_READWRITE, PAGE_NOACCESS, 1) && ok;
+
+    ok = write_watch_beside() && ok;
+    ok = copy_between_host_pages() && ok;
+    ok = accesses_while_neighbour_changes() && ok;
 
     printf("subpage verdict=%s\n", ok ? "pass" : "fail");
     fflush(stdout);
