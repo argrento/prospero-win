@@ -409,8 +409,14 @@ int main(void)
     assert(pw_wine_next_input(&out) && out.type==PW_WINE_INPUT_KEY && out.code==0x0d && out.down==1);
     assert(pw_wine_next_input(&out) && out.type==PW_WINE_INPUT_MOUSE_BUTTON && out.code==1 && !out.down);
     assert(!pw_wine_next_input(&out));
+    /* the side buttons, X1 and X2 */
+    e=(PwWineInput){PW_WINE_INPUT_MOUSE_BUTTON,3,0,0,1};assert(!pw_wine_post_input(&e));
+    e=(PwWineInput){PW_WINE_INPUT_MOUSE_BUTTON,4,0,0,0};assert(!pw_wine_post_input(&e));
+    assert(pw_wine_next_input(&out) && out.code==3 && out.down==1);
+    assert(pw_wine_next_input(&out) && out.code==4 && !out.down);
+    assert(!pw_wine_next_input(&out));
     PwWineInput bad[]={{0,1,0,0,1},{PW_WINE_INPUT_KEY,0,0,0,1},{PW_WINE_INPUT_KEY,256,0,0,1},
-                       {PW_WINE_INPUT_KEY,65,0,0,2},{PW_WINE_INPUT_MOUSE_BUTTON,3,0,0,1},{99,0,0,0,0}};
+                       {PW_WINE_INPUT_KEY,65,0,0,2},{PW_WINE_INPUT_MOUSE_BUTTON,5,0,0,1},{99,0,0,0,0}};
     for(unsigned i=0;i<sizeof(bad)/sizeof(bad[0]);i++)assert(pw_wine_post_input(&bad[i])==-1);
     assert(pw_wine_post_input(NULL)==-1);
     e=(PwWineInput){PW_WINE_INPUT_MOUSE_MOVE,0,1,2,0};
@@ -419,7 +425,7 @@ int main(void)
     for(int i=0;i<PW_WINE_INPUT_QUEUE;i++)assert(pw_wine_next_input(&out) && out.x==1 && out.y==2);
     assert(!pw_wine_next_input(&out));
     pw_wine_sink_stats(&s);
-    assert(s.inputs_posted==2+PW_WINE_INPUT_QUEUE && s.inputs_delivered==s.inputs_posted);
+    assert(s.inputs_posted==4+PW_WINE_INPUT_QUEUE && s.inputs_delivered==s.inputs_posted);
     assert(s.inputs_dropped==sizeof(bad)/sizeof(bad[0])+2);
 
     /* The wake pipe: readable after a post, empty once drained. */

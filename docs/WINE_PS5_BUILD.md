@@ -269,6 +269,7 @@ before evaluating a candidate built from that cache.
 | 1034 | `ntdll`: a thread steps over one instruction with up to four host pages opened (0974 kept one). A movs that reads a host page and writes another, both closed for a protected neighbour, faulted on the second while the first was open, and that fault reached the program as an access violation on a page it can write: the Mario Kart World PC port, whose handler makes the page writable and runs the instruction again, looped at about 92,000 faults a second in `ucrtbase` memcpy once 1033 let it start. `tests/test_wine_subpage_protect.py` copies 8 bytes with `rep movsb` between two such host pages in a thread it waits 5 s for: without the patch the copy never ends with 16 KiB host pages |
 | 1035 | `ntdll`: an access that faults beside a protected page while another thread changes a protection in the same host page, so that the host page allows the access by the time the fault is handled, runs again instead of reaching the program as an access violation on a page it may use (0986 retried only when the host page had been kept whole). `tests/test_wine_subpage_protect.py` reads and writes a page 200000 times while another thread protects and unprotects the page beside it: 5 to 48 access violations a run without the patch, none with it |
 | 1036 | `ntdll`: 1033, 1034 and 1035 apply only with `PW_SUBPAGE_FIXES=1`. Without it a fault beside a protected page is handled as before them: the union of the pages' protections decides whether a write-watched write runs again, a thread steps over one host page at a time, and an access runs again only when the host page was kept whole. GTA V's story load hangs on a write-watched write beside a protected page (about 170,000 faults a second on one page), the case 1033 ends. Off by default. |
+| 1037 | `win32u`: the PS5 driver sends the title's mouse button codes 3 and 4 as the side buttons, X1 (back) and X2 (forward), with `MOUSEEVENTF_XDOWN`/`MOUSEEVENTF_XUP` and the button in `mouseData`; it sent only left, right and middle (0670), and the sink refused the codes. The input map's `mouse:back` and `mouse:forward` send them (docs/INPUT_MAP.md) |
 
 ## Allocator
 
@@ -615,7 +616,8 @@ instead of starting explorer. The driver:
   input:
   - keys;
   - the pointer's motion, as a relative move (patch 0670);
-  - buttons.
+  - buttons: left, right and middle, and the side buttons X1 and X2
+    (patch 1037).
 
   The title sends the mouse's and the stick's motion, never a position, so
   Wine's server keeps the only pointer, as it does with a real mouse. It

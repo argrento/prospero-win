@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Fri, 20 Nov 2026 12:00:00 +0100
+Subject: [PATCH] win32u: Send the PS5 title's side mouse buttons.
+
+The title's mouse button codes 3 and 4 are the side buttons (X1 and X2,
+back and forward), which the driver dropped: it sent only left, right and
+middle. Send them as hardware input with MOUSEEVENTF_XDOWN or
+MOUSEEVENTF_XUP and the button in mouseData, as a mouse with side buttons
+does, so the game gets WM_XBUTTONDOWN and WM_XBUTTONUP, raw input and
+GetAsyncKeyState(VK_XBUTTON1/2).
+
+Public contract: MOUSEINPUT carries XBUTTON1 or XBUTTON2 in mouseData with
+MOUSEEVENTF_XDOWN and MOUSEEVENTF_XUP.
+https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-mouseinput
+---
+ dlls/win32u/ps5drv.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/win32u/ps5drv.c b/dlls/win32u/ps5drv.c
+--- a/dlls/win32u/ps5drv.c
++++ b/dlls/win32u/ps5drv.c
+@@ -68,7 +68,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(ps5drv);
+ struct ps5_input
+ {
+     UINT type;              /* 1 key, 2 mouse move, 3 mouse button, 4 wheel */
+-    UINT code;              /* virtual key, or button 0 left 1 right 2 middle */
++    UINT code;              /* virtual key, or button 0 left 1 right 2 middle 3 X1 4 X2 */
+     INT  x, y;              /* mouse move: relative motion in desktop pixels */
+     UINT down;
+ };
+@@ -633,6 +633,16 @@ static void send_mouse( HWND hwnd, DWORD flags, INT x, INT y )
+     NtUserSendHardwareInput( hwnd, 0, &input, 0 );
+ }
+ 
++/* the side buttons: one flag for both, and the button in mouseData */
++static void send_xbutton( HWND hwnd, DWORD button, BOOL down )
++{
++    INPUT input = {.type = INPUT_MOUSE};
++
++    input.mi.dwFlags = down ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP;
++    input.mi.mouseData = button;
++    NtUserSendHardwareInput( hwnd, 0, &input, 0 );
++}
++
+ /* The pointer's position as the server keeps it, in screen coordinates. */
+ static BOOL server_cursor_pos( POINT *pos )
+ {
+@@ -779,6 +789,7 @@ static BOOL ps5_ProcessEvents( DWORD mask )
+             break;
+         case 3:
+             if (event.code < 3) send_mouse( hwnd, button_flags[event.code][event.down != 0], 0, 0 );
++            else if (event.code < 5) send_xbutton( hwnd, event.code == 3 ? XBUTTON1 : XBUTTON2, event.down != 0 );
+             break;
+         case 4:
+             if (event.x) send_wheel( hwnd, event.x );
