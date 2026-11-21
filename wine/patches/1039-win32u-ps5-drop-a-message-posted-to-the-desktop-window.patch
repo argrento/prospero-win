@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Sat, 21 Nov 2026 10:00:00 +0100
+Subject: [PATCH] win32u: Drop a message posted to the PS5 desktop window.
+
+A game crashed when a controller was first used: Slay the Spire's audio
+thread read a null pointer and the process ended.
+
+DirectInput notes input activity by posting WM_USER, with 0 and 0, to
+the desktop window, at most once a second. On a desktop Wine explorer
+owns that window and reads the message. On the PS5 the server creates
+the window and no process serves it. Its handle still names the first
+thread that asked for it, so the post lands in that thread's queue. In
+Slay the Spire that thread is OpenAL Soft's message thread. Its
+GetMessage takes WM_USER..WM_USER+5 and treats WM_USER as "open a
+device", whose device pointer is lParam: 0.
+
+This process holds no WND for the desktop or the message-only window, so
+nothing here can run their procedures (see patch 0967 for sent
+messages). A message posted to either now goes nowhere and the post
+succeeds, as it would once explorer had read it. Only those two handles
+are matched: a message-only window a program creates (parent
+HWND_MESSAGE) is a window of its own and still gets its messages, as
+does every other window and every thread. The first drop is logged as a
+warning, each one as a trace on the msg channel.
+---
+ dlls/win32u/message.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/dlls/win32u/message.c b/dlls/win32u/message.c
+index 734b72df9c..a34e28f00a 100644
+--- a/dlls/win32u/message.c
++++ b/dlls/win32u/message.c
+@@ -4726,6 +4726,23 @@ BOOL WINAPI NtUserPostMessage( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
+ 
+     if (!hwnd) return NtUserPostThreadMessage( GetCurrentThreadId(), msg, wparam, lparam );
+ 
++#ifdef WINE_PS5_USER_DRIVER
++    /* no explorer serves the server-created desktop or the message-only window:
++     * their handles still name the thread that first asked for them, so a
++     * message posted to either reaches that thread's GetMessage, which can take
++     * it for one of its own. This process holds no WND for them and can't run
++     * their procedures: the post goes nowhere, as explorer would have read it. */
++    cache_thread_desktop_windows();
++    if (get_user_thread_info()->top_window && is_desktop_window( hwnd ))
++    {
++        static LONG warned;
++        if (!InterlockedExchange( &warned, 1 ))
++            WARN( "dropping messages posted to the desktop window, first %p msg %x\n", hwnd, msg );
++        TRACE( "dropped hwnd %p msg %x wp %lx lp %lx\n", hwnd, msg, (long)wparam, lparam );
++        return TRUE;
++    }
++#endif
++
+     if (!(info.dest_tid = get_window_thread( hwnd, NULL ))) return FALSE;
+ 
+     if (is_exiting_thread( info.dest_tid )) return TRUE;
