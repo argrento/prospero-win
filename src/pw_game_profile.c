@@ -595,6 +595,16 @@ static int display_field(PwGameDisplay *display, uint32_t *seen, const uint8_t *
         *seen |= 512u;
         return PW_OK;
     }
+    if (is(key, key_length, "hud")) {
+        if (*seen & 1024u) return PW_ERR_MALFORMED;
+        if (is(v, n, "off")) display->hud = PW_GAME_HUD_OFF;
+        else if (is(v, n, "fps")) display->hud = PW_GAME_HUD_FPS;
+        else if (is(v, n, "frametimes")) display->hud = PW_GAME_HUD_FRAMETIMES;
+        else if (is(v, n, "full")) display->hud = PW_GAME_HUD_FULL;
+        else return PW_ERR_UNSUPPORTED;
+        *seen |= 1024u;
+        return PW_OK;
+    }
     if (is(key, key_length, "framegen")) {
         if (*seen & 128u) return PW_ERR_MALFORMED;
         if (is(v, n, "off")) display->framegen = 0;
@@ -1189,9 +1199,12 @@ size_t pw_game_graphics_env(const PwGameProfile *profile, PwGameEnv *env)
     /* DXVK's HUD draws the frame rate and the title's menu (its "menu" item,
      * which an upstream DXVK ignores); Mesa's has no menu. With frame
      * generation the frame rate is the generator's own counter: the backend
-     * counts only the game's frames, before the pictures between them. */
+     * counts only the game's frames, before the pictures between them. The
+     * driver's overlay (hud) replaces both counters and the generator's, so
+     * one overlay draws; DXVK's HUD still draws the menu. */
     int framegen = profile->display.framegen >= 2 && profile->display.framegen <= 4;
-    int fps = profile->display.show_fps && !framegen;
+    int hud = profile->display.hud >= PW_GAME_HUD_FPS && profile->display.hud <= PW_GAME_HUD_FULL;
+    int fps = profile->display.show_fps && !framegen && !hud;
     if (zink) {
         if (fps) env[count++] = (PwGameEnv){ "GALLIUM_HUD", "simple,fps" };
     } else if (fps || profile->display.menu) {
@@ -1201,10 +1214,15 @@ size_t pw_game_graphics_env(const PwGameProfile *profile, PwGameEnv *env)
     if (framegen) {
         static const char *const factors[] = { "2", "3", "4" };
         env[count++] = (PwGameEnv){ "PW_FRAMEGEN", factors[profile->display.framegen - 2] };
-        if (profile->display.show_fps) env[count++] = (PwGameEnv){ "PW_FRAMEGEN_HUD", "1" };
-    } else if (profile->display.fps_counter) {
+        if (profile->display.show_fps && !hud) env[count++] = (PwGameEnv){ "PW_FRAMEGEN_HUD", "1" };
+    } else if (profile->display.fps_counter && !hud) {
         /* A backend with no counter of its own: the driver draws one. */
         env[count++] = (PwGameEnv){ "PW_FRAMEGEN_COUNTER", "1" };
+    }
+    /* The overlay, drawn by the driver (wine/ps5/pw_hud.h) for every backend that presents with Vulkan. */
+    if (hud) {
+        static const char *const levels[] = { "fps", "frametimes", "full" };
+        env[count++] = (PwGameEnv){ "PW_HUD", levels[profile->display.hud - PW_GAME_HUD_FPS] };
     }
     return count;
 }
@@ -1244,12 +1262,14 @@ int pw_game_profile_parse(const uint8_t *bytes, size_t length, PwGameProfile *pr
     for (size_t i = 0; (parsed.display.show_fps || parsed.display.menu) && i < parsed.debug_env_count; i++)
         if (!strcmp(parsed.debug_env[i].name, "DXVK_HUD") || !strcmp(parsed.debug_env[i].name, "GALLIUM_HUD"))
             return PW_ERR_UNSUPPORTED;
-    /* and framegen and fps_counter set the driver's PW_FRAMEGEN variables. */
-    int driver_env = parsed.display.framegen || parsed.display.fps_counter;
+    /* and framegen, fps_counter and hud set the driver's PW_FRAMEGEN and PW_HUD variables. */
+    int driver_env = parsed.display.framegen || parsed.display.fps_counter || parsed.display.hud;
     for (size_t i = 0; driver_env && i < parsed.debug_env_count; i++)
-        if (!strncmp(parsed.debug_env[i].name, "PW_FRAMEGEN", 11)) return PW_ERR_UNSUPPORTED;
+        if (!strncmp(parsed.debug_env[i].name, "PW_FRAMEGEN", 11) || !strcmp(parsed.debug_env[i].name, "PW_HUD"))
+            return PW_ERR_UNSUPPORTED;
     for (size_t i = 0; driver_env && i < parsed.environment_count; i++)
-        if (!strncmp(parsed.environment[i].name, "PW_FRAMEGEN", 11)) return PW_ERR_UNSUPPORTED;
+        if (!strncmp(parsed.environment[i].name, "PW_FRAMEGEN", 11) || !strcmp(parsed.environment[i].name, "PW_HUD"))
+            return PW_ERR_UNSUPPORTED;
     /* A variable is set by one section only: [debug] env or [environment]. */
     for (size_t i = 0; i < parsed.environment_count; i++)
         for (size_t j = 0; j < parsed.debug_env_count; j++)

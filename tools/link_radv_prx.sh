@@ -49,8 +49,9 @@ for name in libSceAgc libSceAgcDriver; do
 done
 "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIC -I"$install/include" -I"$root/wine/ps5" \
     -c "$root/wine/ps5/pw_vulkan_radv.c" -o "$work/obj/pw_vulkan_radv.o"
-# The entry-point profile behind the shim (wine/ps5/pw_vk_radv_profile.h).
-for unit in pw_vk_radv_profile pw_vk_radv_profile_wrap; do
+# The entry-point profile behind the shim (wine/ps5/pw_vk_radv_profile.h), and
+# the performance overlay frame generation's wrappers draw (wine/ps5/pw_hud.h).
+for unit in pw_vk_radv_profile pw_vk_radv_profile_wrap pw_hud; do
     "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIC -I"$install/include" -I"$root/wine/ps5" \
         -c "$root/wine/ps5/$unit.c" -o "$work/obj/$unit.o"
 done
@@ -77,7 +78,7 @@ printf '\t.section .rodata\n\t.balign 16\n\t.globl pw_framegen_network\npw_frame
 framegen_objects+=("$work/obj/pw_framegen_network.o")
 python3 "$root/tools/gen_prx_descriptor.py" "$work/obj/libvulkan_desc.c" \
     vkGetInstanceProcAddr vkGetDeviceProcAddr pw_videoout_idle pw_videoout_show_tiled pw_videoout_cursor pw_videoout_quiesce \
-    pw_videoout_cursor_point pw_vk_radv_profile_set_frame_hook
+    pw_videoout_cursor_point pw_vk_radv_profile_set_frame_hook pw_hud_memory
 "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIC -I"$root/wine/ps5" \
     -c "$work/obj/libvulkan_desc.c" -o "$work/obj/libvulkan_desc.o"
 
@@ -85,7 +86,7 @@ python3 "$root/tools/gen_prx_descriptor.py" "$work/obj/libvulkan_desc.c" \
     --eh-frame-hdr -T "$work/build/mesa_optional_zero.ld" -soname libvulkan.prx -z defs \
     --wrap=sceVideoOutOpen \
     --warn-unresolved-symbols -o "$prx/libvulkan.shared.elf" \
-    "$work/obj/pw_vulkan_radv.o" "$work/obj/pw_vk_radv_profile.o" "$work/obj/pw_vk_radv_profile_wrap.o" \
+    "$work/obj/pw_vulkan_radv.o" "$work/obj/pw_vk_radv_profile.o" "$work/obj/pw_vk_radv_profile_wrap.o" "$work/obj/pw_hud.o" \
     "$work/obj/libvulkan_desc.o" "${framegen_objects[@]}" \
     "$work/stubs/libSceAgc.so" "$work/stubs/libSceAgcDriver.so" \
     "${radv_link_flags[@]}" "${radv_link_inputs[@]}" \

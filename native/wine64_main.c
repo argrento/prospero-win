@@ -1082,6 +1082,35 @@ static void vulkan_frames_resolve(VulkanFrames *vf, const PwPrxDescriptor *ntdll
                vf->show_tiled != NULL, vf->tiled != NULL);
 }
 
+/* The performance overlay's memory line ([display] hud = full): the game's
+ * direct memory, which only Wine counts, handed to libvulkan.prx's
+ * pw_hud_memory once a second. The driver loads when the game first uses
+ * Vulkan, so it is looked up every 5 s until found. */
+typedef struct HudMemory {
+    void (*push)(uint64_t used, uint64_t peak);
+    uint64_t looked;    /* the second it was last looked up */
+} HudMemory;
+
+static void hud_memory_tick(HudMemory *hm, const PwPrxDescriptor *ntdll,
+                            unsigned int (*memory_stats)(uint64_t *, unsigned int), uint64_t second)
+{
+    uint64_t m[2] = { 0 };
+
+    if (!memory_stats) return;
+    if (!hm->push) {
+        void *(*wine_dlsym)(void *, const char *);
+
+        if (hm->looked && second < hm->looked + 5) return;
+        hm->looked = second ? second : 1;
+        wine_dlsym = (void *(*)(void *, const char *))(uintptr_t)pw_prx_lookup(ntdll, "dlsym");
+        if (wine_dlsym)
+            hm->push = (void (*)(uint64_t, uint64_t))(uintptr_t)wine_dlsym(NULL, "pw_hud_memory");
+        if (!hm->push) return;
+        PS5LOG_LOG("PW_WINE64 hud memory to the driver");
+    }
+    if (memory_stats(m, 2) >= 2) hm->push(m[0], m[1]);
+}
+
 /*
  * While a game loads, Wine and the game show nothing for seconds: the
  * title shows a spinner (src/pw_spinner.h) until the game's first frame
@@ -2156,6 +2185,7 @@ int main(int argc, char **argv)
     int pad_arrived = 0;   /* the title's controller has been connected */
     uint64_t shown_sequence = 0, shown = 0, posted = 0, refused = 0;
     VulkanFrames vulkan_frames = { 0 };
+    HudMemory hud_memory = { 0 };
     Loading loading = { 0 };
     ps5log_config log_config;
     PwPadPs5Ops pad_ops;
@@ -2590,9 +2620,9 @@ int main(int argc, char **argv)
             PS5LOG_LOG("PW_WINE64 ignored display opengl_thread=%d (no longer supported)",
                        game->display.opengl_thread);
         PS5LOG_LOG("PW_WINE64 profile id=%s prefix=%s desktop=%s scaling=%d view=%s show_fps=%d framegen=%u "
-                   "input=%s preset=%s mode=%s mouse=%d rumble=%u dll_overrides=%s", game->app.id, prefix,
+                   "hud=%d input=%s preset=%s mode=%s mouse=%d rumble=%u dll_overrides=%s", game->app.id, prefix,
                    desktop[0] ? desktop : "default",
-                   scaling, view, game->display.show_fps, game->display.framegen,
+                   scaling, view, game->display.show_fps, game->display.framegen, (int)game->display.hud,
                    pw_result_name(input_status),
                    game->input.preset[0] ? game->input.preset : "-",
                    game_input.mode == PW_GAME_INPUT_XINPUT ? "xinput" :
@@ -3541,6 +3571,8 @@ int main(int argc, char **argv)
                        frames.width, frames.height, (unsigned long long)posted,
                        (unsigned long long)refused, (unsigned long long)vulkan_frames.shown,
                        (unsigned long long)vulkan_frames.busy, cpu_ms(), audio_grains, audio_audible);
+            if (game && game->display.hud == PW_GAME_HUD_FULL)
+                hud_memory_tick(&hud_memory, start.descriptor, start.memory_stats, tick / 60);
             if (start.virtual_stats && tick % 300 == 0) {
                 static uint64_t faults_logged;
 

@@ -20,6 +20,15 @@
  *   fps_counter = true     ; the Vulkan driver draws the frame rate, for a
  *                          ; backend with no counter of its own (off by
  *                          ; default; framegen's counter comes first)
+ *   hud = frametimes       ; the Vulkan driver's performance overlay, for
+ *                          ; every backend that presents with Vulkan (DXVK,
+ *                          ; vkd3d-proton, Zink): off (default), fps, frametimes
+ *                          ; (adds frame times, the lowest, average and highest
+ *                          ; frame rate of 10 s and a graph) or full (adds the
+ *                          ; game's size against the output's, CPU and memory).
+ *                          ; It replaces show_fps's and fps_counter's counters
+ *                          ; and framegen's, and shows framegen's "30>60"
+ *                          ; (PW_HUD)
  *   framegen = 2           ; frame generation: the screen gets 2, 3 or 4
  *                          ; pictures for each frame the game draws, the ones
  *                          ; between made by MihawkGen in the Vulkan driver
@@ -98,7 +107,8 @@
  *                               ; (PW_VK_BATCH, PW_INPUT_SHARED_FAST,
  *                               ; PW_QPC_TSC_*, GALLIUM_DRIVER, DXVK_HUD
  *                               ; or GALLIUM_HUD while show_fps or menu is on,
- *                               ; and PW_FRAMEGEN* while framegen is on);
+ *                               ; and PW_FRAMEGEN* or PW_HUD while framegen,
+ *                               ; fps_counter or hud is on);
  *                               ; values: letters, digits and _ + - , . = : /
  *
  *   [environment]
@@ -262,6 +272,14 @@ typedef struct PwGameInput {
     PwGameMap map;      /* map = 1: the input map, profile only */
 } PwGameInput;
 
+/* [display] hud: what the driver's performance overlay shows (wine/ps5/pw_hud.h). */
+typedef enum PwGameHud {
+    PW_GAME_HUD_OFF = 0,
+    PW_GAME_HUD_FPS = 1,
+    PW_GAME_HUD_FRAMETIMES = 2,
+    PW_GAME_HUD_FULL = 3,
+} PwGameHud;
+
 typedef struct PwGameDisplay {
     uint32_t width, height;     /* 0x0: the driver's default */
     PwGameScaling scaling;
@@ -270,6 +288,7 @@ typedef struct PwGameDisplay {
     int menu;                   /* the in-game menu (pw_game_menu) */
     uint32_t framegen;          /* pictures per game frame, 2..4; 0 off (PW_FRAMEGEN) */
     uint32_t fps_counter;       /* the driver draws the frame rate (PW_FRAMEGEN_COUNTER) */
+    PwGameHud hud;              /* the driver's performance overlay (PW_HUD); off by default */
     uint32_t refresh;           /* the output's rate: 60 or 120 */
     uint32_t frame_rate;        /* a cap: 0 (none), 120, 60, 40 or 30 */
     int opengl_thread;          /* parsed but unused since Zink */

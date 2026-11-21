@@ -111,6 +111,43 @@ static void test_graphics_env(void)
     assert(parse(APP "[display]\nframegen = 3\n[debug]\nenv = PW_FRAMEGEN=2\n", &p) == PW_ERR_UNSUPPORTED);
     assert(parse(APP "[display]\nframegen = 3\n[debug]\nenv = PW_FRAMEGEN_HUD=0\n", &p) == PW_ERR_UNSUPPORTED);
     assert(parse(APP "[debug]\nenv = PW_FRAMEGEN=2\n", &p) == PW_OK && p.display.framegen == 0);
+    /* hud: the driver's overlay, for every backend; it replaces show_fps's, fps_counter's
+     * and framegen's counters, and DXVK's HUD keeps only the menu. */
+    {
+        static const char *const levels[] = { "fps", "frametimes", "full" };
+        for (int l = 0; l < 3; l++) {
+            char text[256];
+            snprintf(text, sizeof(text), APP "[display]\nshow_fps = false\nhud = %s\n", levels[l]);
+            assert(parse(text, &p) == PW_OK && p.display.hud == (PwGameHud)(PW_GAME_HUD_FPS + l));
+            assert(pw_game_graphics_env(&p, env) == 1 && !strcmp(env[0].name, "PW_HUD") &&
+                   !strcmp(env[0].value, levels[l]));
+        }
+    }
+    assert(parse(APP "[display]\nshow_fps = false\n", &p) == PW_OK && p.display.hud == PW_GAME_HUD_OFF);
+    assert(parse(APP "[display]\nshow_fps = false\nhud = off\n", &p) == PW_OK && p.display.hud == PW_GAME_HUD_OFF);
+    assert(pw_game_graphics_env(&p, env) == 0);
+    assert(parse(APP "[display]\nhud = everything\n", &p) == PW_ERR_UNSUPPORTED);
+    assert(parse(APP "[display]\nhud = fps\nhud = full\n", &p) == PW_ERR_MALFORMED);
+    /* show_fps left on: the backend's counter gives way to the overlay. */
+    assert(parse(APP "[display]\nhud = full\n", &p) == PW_OK && p.display.show_fps == 1);
+    assert(pw_game_graphics_env(&p, env) == 1 && !strcmp(env[0].name, "PW_HUD"));
+    p.app.graphics = PW_APP_GRAPHICS_ZINK;
+    assert(pw_game_graphics_env(&p, env) == 3 && !strcmp(env[0].name, "GALLIUM_DRIVER") &&
+           !strcmp(env[2].name, "PW_HUD"));
+    assert(parse(APP "[display]\nshow_fps = false\nfps_counter = true\nhud = fps\n", &p) == PW_OK);
+    assert(pw_game_graphics_env(&p, env) == 1 && !strcmp(env[0].name, "PW_HUD") && !strcmp(env[0].value, "fps"));
+    /* With frame generation the overlay shows its pictures; the menu stays DXVK's. */
+    assert(parse(APP "[display]\nframegen = 2\nmenu = true\nhud = frametimes\n", &p) == PW_OK);
+    assert(pw_game_graphics_env(&p, env) == 3 && !strcmp(env[0].name, "DXVK_HUD") &&
+           !strcmp(env[0].value, "menu") && !strcmp(env[1].name, "PW_FRAMEGEN") && !strcmp(env[2].name, "PW_HUD") &&
+           !strcmp(env[2].value, "frametimes"));
+    p.app.graphics = PW_APP_GRAPHICS_ZINK;
+    assert(pw_game_graphics_env(&p, env) <= PW_GAME_GRAPHICS_ENV_MAX);
+    /* The overlay's variable is the title's while hud is on; DXVK's HUD stays reachable through [debug] env. */
+    assert(parse(APP "[display]\nhud = fps\n[debug]\nenv = PW_HUD=full\n", &p) == PW_ERR_UNSUPPORTED);
+    assert(parse(APP "[display]\nhud = fps\n[debug]\nenv = PW_FRAMEGEN_COUNTER=1\n", &p) == PW_ERR_UNSUPPORTED);
+    assert(parse(APP "[display]\nshow_fps = false\nhud = fps\n[debug]\nenv = DXVK_HUD=full\n", &p) == PW_OK);
+    assert(parse(APP "[debug]\nenv = PW_HUD=full\n", &p) == PW_OK && p.display.hud == PW_GAME_HUD_OFF);
     /* A Zink game's [debug] env decides the deferral itself: the title adds none. */
     assert(parse(APP "[debug]\nenv = PW_VK_DEFER_DESCRIPTORS=0\n", &p) == PW_OK);
     p.app.graphics = PW_APP_GRAPHICS_ZINK; p.display.show_fps = 0;

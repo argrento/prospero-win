@@ -1330,6 +1330,21 @@ The title runs one game per process (`src/pw_wine_launch.h`):
     vkd3d-proton: `libvulkan.prx` draws the game's frame rate on each frame it
     presents. It adds no images and keeps the present mode. `framegen` comes
     first, and the game's real rate is what it shows;
+  - `[display] hud = fps`, `frametimes` or `full` (default `off`) sets
+    `PW_HUD`: `libvulkan.prx` draws a performance overlay in the top-left
+    corner of every picture, for any game that presents through Vulkan
+    (DXVK, vkd3d-proton, Zink). `fps` is the frame rate; `frametimes` adds the
+    frame time, the lowest, average and highest frame rate of the last 10
+    seconds and a graph of the last 120 frames' times; `full` adds the size
+    the game draws at and VideoOut's framebuffer when they differ
+    (`RES 1600x900>1920x1080`), the process's CPU time as a share of one core
+    and of all of them, and the direct memory Wine has backed, now and at
+    most (the title hands it to `pw_hud_memory` once a second). A line the
+    driver has no number for is left out. It replaces the `show_fps`,
+    `fps_counter` and frame generation counters, so one overlay draws, and
+    shows frame generation's `30.0>60.0`; DXVK's HUD still draws the `menu`.
+    The overlay (`wine/ps5/pw_hud.c`) is drawn on the CPU into a small
+    image and blitted, scaled, onto each picture;
   - `[display] framegen = 2`, `3` or `4` (default `off`) sets `PW_FRAMEGEN`:
     `libvulkan.prx` (`wine/ps5/pw_framegen.cpp`) gives the screen that many
     pictures for each frame the game presents, the ones between made by
@@ -1379,7 +1394,9 @@ The title runs one game per process (`src/pw_wine_launch.h`):
     refused, so these only add: `PW_VK_BATCH`, `PW_INPUT_SHARED_FAST`,
     `PW_QPC_TSC_*`, `GALLIUM_DRIVER`, `DXVK_HUD` or `GALLIUM_HUD` while
     `show_fps` is on (set `show_fps = false` to choose the HUD), and
-    `PW_FRAMEGEN*` while `framegen` or `fps_counter` is on. The log
+    `PW_FRAMEGEN*` or `PW_HUD` while `framegen`, `fps_counter` or `hud` is
+    on. With `hud` on and `show_fps = false`, `DXVK_HUD` stays free for
+    DXVK's own HUD. The log
     names them (`PW_WINE64 debug_env=`).
     Titles built before the limit went up to five accept four lines.
   - `[environment]` adds up to eight `NAME = value` lines to that game's

@@ -611,6 +611,7 @@ wine/patches/0910-win32u-ps5-worker-desktop-cache.patch
 
 # Actual native pipeline transport proof
 tests/test_vk_radv_profile.c
+tests/test_pw_hud.c
 tests/test_vk_radv_profile.py
 wine/ps5/pw_vk_radv_profile.c
 wine/ps5/pw_vk_radv_profile.h
@@ -652,6 +653,8 @@ third_party/mihawkgen/src/shaders/sp_vec.comp.h
 wine/ps5/pw_framegen.cpp
 wine/ps5/pw_framegen.h
 wine/ps5/pw_framegen_vk.h
+wine/ps5/pw_hud.c
+wine/ps5/pw_hud.h
 docs/cs-thread-profile.md
 tests/test_native_profile_frames.py
 tools/native_profile_frames.py

@@ -8,14 +8,19 @@
  * them: a 30 fps program fills a 60 Hz screen at FACTOR 2. Nothing changes for the program or Wine; a
  * swapchain the generator cannot serve (memory, format, the network) is
  * left as it was. Once a second it logs the program's frames and the
- * pictures presented; with PW_FRAMEGEN_HUD=1 (show_fps) it also draws them
- * in the top left of every picture ("30 -> 60"), after generation, so the
- * counter is never blended.
+ * pictures presented.
  *
- * With PW_FRAMEGEN_COUNTER=1 and no PW_FRAMEGEN it only counts: the program's
- * frames are drawn on as they are presented, with the same counter and one
- * number, for a backend that has none of its own. The swapchain keeps its
- * images and present mode, and no generator or network is loaded.
+ * The performance overlay (pw_hud.h) is drawn in the top left of every
+ * picture, after generation, so it is never blended: PW_HUD=fps|frametimes|
+ * full ([display] hud), or the frame rate alone for PW_FRAMEGEN_HUD=1 with
+ * a factor (show_fps) and PW_FRAMEGEN_COUNTER=1 without (fps_counter). The
+ * overlay is drawn into a host buffer, copied into a small image and blitted,
+ * scaled, onto the picture: one copy and one blit a picture.
+ *
+ * With an overlay and no PW_FRAMEGEN it only counts: the program's frames
+ * are drawn on as they are presented, for a backend that has no overlay of
+ * its own or whose overlay is replaced. The swapchain keeps its images and
+ * present mode, and no generator or network is loaded.
  *
  * GPL-3.0-or-later because it links MihawkGen; libvulkan.prx, the only
  * module it goes into, is distributed under the GPL as a whole
@@ -23,6 +28,8 @@
 #include "pw_framegen_vk.h"
 #include <pthread.h>
 #include <stdint.h>
+#include <sys/resource.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,9 +37,12 @@
 #include <new>
 #include "framegen.h"
 #include "pw_framegen.h"
+#include "pw_hud.h"
 
 extern "C" PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *name);
 extern "C" PFN_vkVoidFunction VKAPI_CALL vk_common_GetDeviceProcAddr(VkDevice device, const char *name);
+/* RADV's WSI (pw_vulkan_radv.c): where the swapchain's images show in VideoOut's framebuffer, and its size. */
+extern "C" bool wsi_videoout_present_rect(VkRect2D *rect, VkExtent2D *frame);
 /* The trained network, embedded by tools/link_radv_prx.sh (pw_framegen_network.S). */
 extern "C" const unsigned char pw_framegen_network[], pw_framegen_network_end[];
 
@@ -56,19 +66,6 @@ struct Image {
     VkImageView view = VK_NULL_HANDLE;
 };
 
-/* The counter's font: 5x7 glyphs in 6x9 cells, white on black, as one row
- * of an RGBA8 atlas blitted (scaled, nearest) onto the pictures. */
-constexpr uint32_t kCellW = 6, kCellH = 9;
-constexpr int kGlyphArrow = 10, kGlyphSpace = 11, kGlyphs = 12;
-constexpr uint8_t kFont[kGlyphs][7] = {
-    {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}, {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E},
-    {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}, {0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E},
-    {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}, {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E},
-    {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}, {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08},
-    {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}, {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C},
-    {0x00, 0x04, 0x02, 0x1F, 0x02, 0x04, 0x00}, {0},
-};
-constexpr uint32_t kHudChars = 12;
 constexpr uint32_t kMaxPresentWaits = 16;
 
 struct Chain {
@@ -91,19 +88,21 @@ struct Chain {
     /* counting only: one per image, free again once the image is reacquired */
     VkSemaphore image_done[kMaxImages]{};
     uint32_t slot = 0;
-    /* the last second's counts, and the one being counted */
-    uint64_t window_start = 0;
-    uint32_t real_count = 0, shown_count = 0, real_rate = 0, shown_rate = 0;
-    bool measured = false;
-    /* the counter's atlas and the buffer it was uploaded from */
-    Image font;
-    VkBuffer font_buffer = VK_NULL_HANDLE;
-    VkDeviceMemory font_memory = VK_NULL_HANDLE;
-    bool font_uploaded = false;
+    /* what the overlay counts */
+    PwHudStats stats{};
+    /* the overlay: its image, and a mapped host buffer a slot it is drawn into */
+    Image hud;
+    VkBuffer hud_buffer[kSlots]{};
+    VkDeviceMemory hud_memory[kSlots]{};
+    uint32_t *hud_pixels[kSlots]{};
 };
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 int factor_setting = -1, hud_setting = -1, counter_setting = -1;
+long cpus_online = -1;
+/* the game's direct memory, from the title (pw_hud_memory) */
+/* used and peak in MiB, in one word so a reader never mixes two samples; 0 none yet */
+uint64_t memory_mib;
 VkInstance instance_seen = VK_NULL_HANDLE;
 bool device_loaded = false;
 struct { VkDevice device; VkPhysicalDevice physical; } devices[8];
@@ -128,21 +127,25 @@ uint32_t factor(void)
     return (uint32_t)factor_setting;
 }
 
-bool hud(void)
+/* The overlay's level: PW_HUD, else the frame rate for PW_FRAMEGEN_HUD=1
+ * with a factor or PW_FRAMEGEN_COUNTER=1 without. */
+PwHudLevel hud(void)
 {
     if (hud_setting < 0) {
-        const char *value = getenv("PW_FRAMEGEN_HUD");
-        hud_setting = value && value[0] == '1';
+        PwHudLevel level = pw_hud_level_parse(getenv("PW_HUD"));
+        const char *value = getenv(factor() ? "PW_FRAMEGEN_HUD" : "PW_FRAMEGEN_COUNTER");
+        if (level == PW_HUD_OFF && value && value[0] == '1') level = PW_HUD_FPS;
+        hud_setting = (int)level;
+        if (level) fprintf(stderr, "pw_framegen: overlay level %d\n", (int)level);
     }
-    return hud_setting;
+    return (PwHudLevel)hud_setting;
 }
 
-/* Counting without generating: PW_FRAMEGEN_COUNTER=1, and no factor. */
+/* Counting without generating: an overlay, and no factor. */
 bool counter_only(void)
 {
     if (counter_setting < 0) {
-        const char *value = getenv("PW_FRAMEGEN_COUNTER");
-        counter_setting = !factor() && value && value[0] == '1';
+        counter_setting = !factor() && hud();
         if (counter_setting) fprintf(stderr, "pw_framegen: counter only\n");
     }
     return counter_setting;
@@ -197,8 +200,12 @@ uint32_t memory_type(VkPhysicalDevice physical, uint32_t bits, VkMemoryPropertyF
     return UINT32_MAX;
 }
 
+void free_image(VkDevice device, Image *image);
+
+/* An image of the chain's size, or extent; with a view unless view is false
+ * (an image only copied and blitted, whose usage takes no view). */
 bool make_image(Chain *c, VkPhysicalDevice physical, VkImageUsageFlags usage, Image *out,
-                VkExtent2D extent = {0, 0})
+                VkExtent2D extent = {0, 0}, bool view_too = true)
 {
     if (!extent.width) extent = c->extent;
     VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -219,6 +226,7 @@ bool make_image(Chain *c, VkPhysicalDevice physical, VkImageUsageFlags usage, Im
     if (type == UINT32_MAX || vkAllocateMemory(c->device, &alloc, nullptr, &out->memory) != VK_SUCCESS ||
         vkBindImageMemory(c->device, out->image, out->memory, 0) != VK_SUCCESS)
         return false;
+    if (!view_too) return true;
     VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     view.image = out->image;
     view.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -227,39 +235,45 @@ bool make_image(Chain *c, VkPhysicalDevice physical, VkImageUsageFlags usage, Im
     return vkCreateImageView(c->device, &view, nullptr, &out->view) == VK_SUCCESS;
 }
 
-/* The counter's atlas, drawn into a host buffer here and copied into the
- * image by the first present (record_font_upload). */
-bool make_font(Chain *c, VkPhysicalDevice physical)
+/* The overlay's image, and a host buffer a slot that each present draws the
+ * overlay into (record_hud) while that slot's fence keeps the GPU off it. */
+bool make_hud(Chain *c, VkPhysicalDevice physical)
 {
-    constexpr uint32_t width = kCellW * kGlyphs, height = kCellH;
-    if (!make_image(c, physical, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &c->font,
-                    {width, height}))
+    if (!make_image(c, physical, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &c->hud,
+                    {PW_HUD_MAX_W, PW_HUD_MAX_H}, false))
         return false;
-    VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    info.size = width * height * 4;
-    info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    if (vkCreateBuffer(c->device, &info, nullptr, &c->font_buffer) != VK_SUCCESS) return false;
-    VkMemoryRequirements req;
-    vkGetBufferMemoryRequirements(c->device, c->font_buffer, &req);
-    VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    alloc.allocationSize = req.size;
-    alloc.memoryTypeIndex = memory_type(physical, req.memoryTypeBits,
-                                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    void *mapped = nullptr;
-    if (alloc.memoryTypeIndex == UINT32_MAX ||
-        vkAllocateMemory(c->device, &alloc, nullptr, &c->font_memory) != VK_SUCCESS ||
-        vkBindBufferMemory(c->device, c->font_buffer, c->font_memory, 0) != VK_SUCCESS ||
-        vkMapMemory(c->device, c->font_memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS)
-        return false;
-    uint32_t *pixels = (uint32_t *)mapped;
-    for (uint32_t y = 0; y < height; y++)
-        for (uint32_t x = 0; x < width; x++) {
-            uint32_t glyph = x / kCellW, gx = x % kCellW, gy = y;
-            bool on = gx >= 1 && gy >= 1 && gy <= 7 && (kFont[glyph][gy - 1] >> (5 - gx) & 1);
-            pixels[y * width + x] = on ? 0xFFFFFFFFu : 0xFF000000u;  /* ABGR in memory: white, black */
-        }
-    vkUnmapMemory(c->device, c->font_memory);
+    for (uint32_t s = 0; s < kSlots; s++) {
+        VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        info.size = (VkDeviceSize)PW_HUD_MAX_W * PW_HUD_MAX_H * 4;
+        info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        if (vkCreateBuffer(c->device, &info, nullptr, &c->hud_buffer[s]) != VK_SUCCESS) return false;
+        VkMemoryRequirements req;
+        vkGetBufferMemoryRequirements(c->device, c->hud_buffer[s], &req);
+        VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        alloc.allocationSize = req.size;
+        alloc.memoryTypeIndex = memory_type(physical, req.memoryTypeBits,
+                                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        void *mapped = nullptr;
+        if (alloc.memoryTypeIndex == UINT32_MAX ||
+            vkAllocateMemory(c->device, &alloc, nullptr, &c->hud_memory[s]) != VK_SUCCESS ||
+            vkBindBufferMemory(c->device, c->hud_buffer[s], c->hud_memory[s], 0) != VK_SUCCESS ||
+            vkMapMemory(c->device, c->hud_memory[s], 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS)
+            return false;
+        c->hud_pixels[s] = (uint32_t *)mapped;
+    }
     return true;
+}
+
+void free_hud(Chain *c)
+{
+    free_image(c->device, &c->hud);
+    for (uint32_t s = 0; s < kSlots; s++) {
+        if (c->hud_buffer[s]) vkDestroyBuffer(c->device, c->hud_buffer[s], nullptr);
+        if (c->hud_memory[s]) vkFreeMemory(c->device, c->hud_memory[s], nullptr);  /* unmaps it */
+        c->hud_buffer[s] = VK_NULL_HANDLE;
+        c->hud_memory[s] = VK_NULL_HANDLE;
+        c->hud_pixels[s] = nullptr;
+    }
 }
 
 void free_image(VkDevice device, Image *image)
@@ -279,9 +293,7 @@ void free_chain(Chain *c)
         free_image(c->device, &c->history[0]);
         free_image(c->device, &c->history[1]);
         for (auto &image : c->output) free_image(c->device, &image);
-        free_image(c->device, &c->font);
-        if (c->font_buffer) vkDestroyBuffer(c->device, c->font_buffer, nullptr);
-        if (c->font_memory) vkFreeMemory(c->device, c->font_memory, nullptr);
+        free_hud(c);
         for (uint32_t s = 0; s < kSlots; s++) {
             if (c->fence[s]) vkDestroyFence(c->device, c->fence[s], nullptr);
             if (c->real_done[s]) vkDestroySemaphore(c->device, c->real_done[s], nullptr);
@@ -297,12 +309,12 @@ void free_chain(Chain *c)
     delete c;
 }
 
-/* Counting without generating: the images, the counter and synchronisation.
+/* Counting without generating: the images, the overlay and synchronisation.
  * A swapchain with more images than the table is left as it was. */
 bool setup_counter_chain(Chain *c, VkPhysicalDevice physical)
 {
-    if (!make_font(c, physical)) {
-        fprintf(stderr, "pw_framegen: no counter font: no counter\n");
+    if (!make_hud(c, physical)) {
+        fprintf(stderr, "pw_framegen: no overlay image: no overlay\n");
         return false;
     }
     VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
@@ -350,9 +362,9 @@ bool setup_chain(Chain *c)
     for (uint32_t k = 0; k < c->factor - 1; k++)
         if (!make_image(c, physical, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &c->output[k]))
             return false;
-    if (hud() && !make_font(c, physical)) {
-        fprintf(stderr, "pw_framegen: no counter font: counting in the log only\n");
-        free_image(c->device, &c->font);
+    if (hud() && !make_hud(c, physical)) {
+        fprintf(stderr, "pw_framegen: no overlay image: counting in the log only\n");
+        free_hud(c);
     }
     VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
@@ -368,7 +380,7 @@ bool setup_chain(Chain *c)
     }
     fprintf(stderr, "pw_framegen: swapchain %ux%u, %u images, factor %u, %s%s\n", c->extent.width,
             c->extent.height, c->image_count, c->factor, c->method == FG_METHOD_NEURAL ? "neural" : "blend",
-            c->font.view ? ", counter on screen" : "");
+            c->hud_pixels[0] ? ", overlay on screen" : "");
     return true;
 }
 
@@ -416,65 +428,83 @@ void blit(VkCommandBuffer cmd, VkImage from, VkImage to, VkExtent2D extent)
                    &region, VK_FILTER_NEAREST);
 }
 
-void record_font_upload(Chain *c, VkCommandBuffer cmd)
+/* The overlay, drawn into slot s's buffer and copied into its image, left
+ * ready to blit (TRANSFER_SRC): its size in *width and *height, or false
+ * when there is nothing to show yet. */
+bool record_hud(Chain *c, VkCommandBuffer cmd, uint32_t s, uint32_t *width, uint32_t *height)
 {
-    barrier(cmd, c->font.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
-            VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    if (!c->hud.image || !c->hud_pixels[s]) return false;
+    pw_hud_draw(&c->stats, hud(), c->factor != 0, c->hud_pixels[s], PW_HUD_MAX_W, width, height);
+    if (!*width || !*height) return false;
+    /* What the previous present blitted from it is overwritten: its read comes first. */
+    barrier(cmd, c->hud.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     VkBufferImageCopy region{};
+    region.bufferRowLength = PW_HUD_MAX_W;
     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.imageExtent = {kCellW * kGlyphs, kCellH, 1};
-    vkCmdCopyBufferToImage(cmd, c->font_buffer, c->font.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-    barrier(cmd, c->font.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+    region.imageExtent = {*width, *height, 1};
+    vkCmdCopyBufferToImage(cmd, c->hud_buffer[s], c->hud.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    barrier(cmd, c->hud.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT);
-    c->font_uploaded = true;
+    return true;
 }
 
-/* The counter, " 30>60 " in the font's cells, onto an image in
- * TRANSFER_DST layout; nothing before the first second is measured. */
-void record_counter(Chain *c, VkCommandBuffer cmd, VkImage target)
+/* The overlay recorded by record_hud onto an image in TRANSFER_DST layout,
+ * in its top left, scaled with the picture (2x at 1080p). */
+void blit_hud(Chain *c, VkCommandBuffer cmd, VkImage target, uint32_t width, uint32_t height)
 {
-    if (!c->font_uploaded || !c->measured) return;
-    int glyphs[kHudChars], n = 0;
-    char text[kHudChars + 1];
-    if (c->factor) snprintf(text, sizeof(text), " %u>%u ", c->real_rate, c->shown_rate);
-    else snprintf(text, sizeof(text), " %u ", c->real_rate);
-    for (const char *p = text; *p && n < (int)kHudChars; p++)
-        glyphs[n++] = *p == '>' ? kGlyphArrow : *p >= '0' && *p <= '9' ? *p - '0' : kGlyphSpace;
-    uint32_t scale = c->extent.height / 270 > 2 ? c->extent.height / 270 : 2, margin = 2 * scale;
-    if (margin + n * kCellW * scale > c->extent.width || margin + kCellH * scale > c->extent.height) return;
-    VkImageBlit regions[kHudChars]{};
-    for (int i = 0; i < n; i++) {
-        VkImageBlit &r = regions[i];
-        r.srcSubresource = r.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        r.srcOffsets[0] = {(int32_t)(glyphs[i] * kCellW), 0, 0};
-        r.srcOffsets[1] = {(int32_t)((glyphs[i] + 1) * kCellW), (int32_t)kCellH, 1};
-        r.dstOffsets[0] = {(int32_t)(margin + i * kCellW * scale), (int32_t)margin, 0};
-        r.dstOffsets[1] = {(int32_t)(margin + (i + 1) * kCellW * scale), (int32_t)(margin + kCellH * scale), 1};
+    uint32_t scale = pw_hud_scale(c->extent.height), margin = 4 * scale;
+    if (margin + width * scale > c->extent.width || margin + height * scale > c->extent.height) return;
+    VkImageBlit r{};
+    r.srcSubresource = r.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    r.srcOffsets[1] = {(int32_t)width, (int32_t)height, 1};
+    r.dstOffsets[0] = {(int32_t)margin, (int32_t)margin, 0};
+    r.dstOffsets[1] = {(int32_t)(margin + width * scale), (int32_t)(margin + height * scale), 1};
+    vkCmdBlitImage(cmd, c->hud.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r, VK_FILTER_NEAREST);
+}
+
+/* What the full overlay shows besides frames, once a second: the size the
+ * program draws at and VideoOut's framebuffer, the process's CPU time and
+ * the direct memory the title last gave. */
+void sample_full(Chain *c, uint64_t now)
+{
+    c->stats.render_w = c->extent.width;
+    c->stats.render_h = c->extent.height;
+    VkRect2D rect;
+    VkExtent2D frame;
+    if (wsi_videoout_present_rect(&rect, &frame) && frame.width && frame.height) {
+        c->stats.output_w = frame.width;
+        c->stats.output_h = frame.height;
     }
-    vkCmdBlitImage(cmd, c->font.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target,
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (uint32_t)n, regions, VK_FILTER_NEAREST);
+    if (cpus_online < 0) cpus_online = sysconf(_SC_NPROCESSORS_ONLN);
+    c->stats.cpus = cpus_online > 0 ? (uint32_t)cpus_online : 0;
+    struct rusage usage;
+    if (!getrusage(RUSAGE_SELF, &usage))
+        pw_hud_cpu(&c->stats,
+                   (uint64_t)(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1000000u +
+                       (uint64_t)(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec),
+                   now);
+    if (uint64_t mib = __atomic_load_n(&memory_mib, __ATOMIC_RELAXED)) {
+        c->stats.memory_bytes = (mib >> 32) << 20;
+        c->stats.memory_peak_bytes = (mib & 0xFFFFFFFFu) << 20;
+        c->stats.memory_known = 1;
+    }
 }
 
 /* Count a program frame and its pictures; once a second, the rates. */
 void count_frame(Chain *c, uint32_t generated)
 {
     uint64_t now = now_ns();
-    if (!c->window_start) c->window_start = now;
-    c->real_count++;
-    c->shown_count += 1 + generated;
-    uint64_t elapsed = now - c->window_start;
-    if (elapsed < 1000000000u) return;
-    c->real_rate = (uint32_t)((c->real_count * 1000000000ull + elapsed / 2) / elapsed);
-    c->shown_rate = (uint32_t)((c->shown_count * 1000000000ull + elapsed / 2) / elapsed);
-    c->measured = true;
+    if (!pw_hud_frame(&c->stats, now, 1 + generated)) return;
+    uint32_t real = (c->stats.fps10 + 5) / 10, shown = (c->stats.shown10 + 5) / 10;
     if (c->factor)
         fprintf(stderr, "pw_framegen: %u frames/s from the program, %u pictures/s presented (%u generated each)\n",
-                c->real_rate, c->shown_rate, generated);
+                real, shown, generated);
     else
-        fprintf(stderr, "pw_framegen: %u frames/s from the program\n", c->real_rate);
-    c->window_start = now;
-    c->real_count = c->shown_count = 0;
+        fprintf(stderr, "pw_framegen: %u frames/s from the program\n", real);
+    if (hud() == PW_HUD_FULL) sample_full(c, now);
 }
 
 Chain *find_chain(VkSwapchainKHR handle)
@@ -580,19 +610,23 @@ VkResult present_counted(Chain *c, VkQueue queue, const VkPresentInfoKHR *info)
     }
     uint32_t s = c->slot;
     c->slot = (c->slot + 1) % kSlots;
-    vkWaitForFences(c->device, 1, &c->fence[s], VK_TRUE, UINT64_MAX);
+    /* The slot's buffer is drawn into below: only once the GPU is done with it. */
+    if (vkWaitForFences(c->device, 1, &c->fence[s], VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+        pthread_mutex_unlock(&lock);
+        return real_QueuePresentKHR(queue, info);
+    }
 
     VkCommandBuffer cmd = c->cmd[s];
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkResetCommandBuffer(cmd, 0);
     vkBeginCommandBuffer(cmd, &begin);
-    const bool font_was_uploaded = c->font_uploaded;
-    if (!c->font_uploaded) record_font_upload(c, cmd);
+    uint32_t hud_w = 0, hud_h = 0;
+    const bool drawn = record_hud(c, cmd, s, &hud_w, &hud_h);
     VkImage frame = c->images[info->pImageIndices[0]];
     barrier(cmd, frame, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
             VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-    record_counter(c, cmd, frame);
+    if (drawn) blit_hud(c, cmd, frame, hud_w, hud_h);
     barrier(cmd, frame, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
             VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
     vkEndCommandBuffer(cmd);
@@ -617,7 +651,6 @@ VkResult present_counted(Chain *c, VkQueue queue, const VkPresentInfoKHR *info)
         vkDestroyFence(c->device, c->fence[s], nullptr);
         c->fence[s] = VK_NULL_HANDLE;
         if (vkCreateFence(c->device, &fence, nullptr, &c->fence[s]) != VK_SUCCESS) drop_chain(c);
-        else c->font_uploaded = font_was_uploaded;
         pthread_mutex_unlock(&lock);
         fprintf(stderr, "pw_framegen: submit failed (%d)\n", (int)result);
         return result;
@@ -645,7 +678,11 @@ VKAPI_ATTR VkResult VKAPI_CALL fg_QueuePresentKHR(VkQueue queue, const VkPresent
     if (!c->factor) return present_counted(c, queue, info);
     uint32_t s = c->slot;
     c->slot = (c->slot + 1) % kSlots;
-    vkWaitForFences(c->device, 1, &c->fence[s], VK_TRUE, UINT64_MAX);
+    /* The slot's buffers are reused below: only once the GPU is done with them. */
+    if (vkWaitForFences(c->device, 1, &c->fence[s], VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+        pthread_mutex_unlock(&lock);
+        return real_QueuePresentKHR(queue, info);
+    }
     vkResetFences(c->device, 1, &c->fence[s]);
 
     uint32_t generate = c->have_prev ? c->factor - 1 : 0, targets[kMaxFactor - 1];
@@ -660,8 +697,8 @@ VKAPI_ATTR VkResult VKAPI_CALL fg_QueuePresentKHR(VkQueue queue, const VkPresent
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkResetCommandBuffer(cmd, 0);
     vkBeginCommandBuffer(cmd, &begin);
-    bool counter = c->font.view != VK_NULL_HANDLE;
-    if (counter && !c->font_uploaded) record_font_upload(c, cmd);
+    uint32_t hud_w = 0, hud_h = 0;
+    const bool counter = record_hud(c, cmd, s, &hud_w, &hud_h);
     VkImage frame = c->images[info->pImageIndices[0]];
     Image &now = c->history[c->cur], &before = c->history[c->cur ^ 1];
     barrier(cmd, frame, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0,
@@ -674,7 +711,7 @@ VKAPI_ATTR VkResult VKAPI_CALL fg_QueuePresentKHR(VkQueue queue, const VkPresent
         barrier(cmd, frame, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_TRANSFER_BIT);
-        record_counter(c, cmd, frame);
+        blit_hud(c, cmd, frame, hud_w, hud_h);
         barrier(cmd, frame, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                 VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
     } else {
@@ -705,7 +742,7 @@ VKAPI_ATTR VkResult VKAPI_CALL fg_QueuePresentKHR(VkQueue queue, const VkPresent
             barrier(cmd, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT);
-            record_counter(c, cmd, target);
+            blit_hud(c, cmd, target, hud_w, hud_h);
         }
         barrier(cmd, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                 VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -780,6 +817,17 @@ PFN_vkVoidFunction wrap(const char *name, PFN_vkVoidFunction real)
 }
 
 }  // namespace
+
+/* The title's direct memory for the full overlay's memory line, used and at
+ * most, once a second (native/wine64_main.c, hud_memory_tick). */
+extern "C" void pw_hud_memory(uint64_t used, uint64_t peak)
+{
+    uint64_t used_mib = used >> 20, peak_mib = peak >> 20;
+    if (used_mib > 0xFFFFFFFFu) used_mib = 0xFFFFFFFFu;
+    if (peak_mib > 0xFFFFFFFFu) peak_mib = 0xFFFFFFFFu;
+    /* never 0, so "none yet" stays apart from an empty pool */
+    __atomic_store_n(&memory_mib, (used_mib << 32 | peak_mib) | (used_mib || peak_mib ? 0 : 1), __ATOMIC_RELAXED);
+}
 
 extern "C" PFN_vkVoidFunction pw_framegen_resolve(VkInstance instance, const char *name, PFN_vkVoidFunction real)
 {

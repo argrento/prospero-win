@@ -20,7 +20,7 @@ Every record the title writes starts with `PW_WINE64`:
 | `mirror` | the library copy for the launcher: target, status, errno |
 | `launcher` / `launcher chose` | VideoOut and pad status, games, cycle; the chosen game or `sync` |
 | `restart` / `restart failed` | the `LoadExec` target, cycle, reason and eboot; the failure code |
-| `profile` | the game's id, prefix, desktop, scaling, view, whether it shows the frame rate (`show_fps`) and input mode |
+| `profile` | the game's id, prefix, desktop, scaling, view, whether it shows the frame rate (`show_fps`), frame generation, the performance overlay's level (`hud`, 0 off to 3 full) and input mode |
 | `winedebug` | the game's own `WINEDEBUG`, when its profile's `[debug]` section sets one |
 | `debug_env` | the names of the profile's `[debug] env` variables, comma-separated, when it has any |
 | `runtime` / `fast_clock` | the profile's `[runtime]` switches (`thread_scheduling`, `shared_input`) and locales (`system_locale`, `user_locale`, `-` when unset); with `fast_clock = true`, whether the TSC clock is on, the measured `tsc_hz` and the calibration result (`ok`, or why it was refused: `bracket`, `short`, `backward`, `range`, `disagree`) |

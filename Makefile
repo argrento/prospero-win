@@ -91,6 +91,8 @@ $(eval $(call test_rule,test_vk_present_interval,tests/test_vk_present_interval.
 $(BUILD)/test_vk_present_interval: wine/ps5/vulkan/pw_vk_present_interval.h
 $(eval $(call test_rule,test_vk_radv_profile,tests/test_vk_radv_profile.c wine/ps5/pw_vk_radv_profile.c,-Iwine/ps5))
 $(BUILD)/test_vk_radv_profile: wine/ps5/pw_vk_radv_profile.h wine/ps5/pw_vk_radv_profile_list.h
+$(eval $(call test_rule,test_pw_hud,tests/test_pw_hud.c wine/ps5/pw_hud.c,-Iwine/ps5))
+$(BUILD)/test_pw_hud: wine/ps5/pw_hud.h
 $(eval $(call test_rule,test_vk_command_stream,tests/test_vk_command_stream.c wine/ps5/pw_vk_command_stream.c,-Iwine/ps5))
 $(eval $(call test_rule,test_vk_spsc,tests/test_vk_spsc.c wine/ps5/pw_vk_spsc.c wine/ps5/pw_vk_command_stream.c,-I. -pthread))
 $(BUILD)/test_vk_spsc: wine/ps5/pw_vk_spsc.h wine/ps5/pw_vk_command_stream.h
@@ -197,7 +199,7 @@ TESTS := test_pw_title_id test_pw_title_sandbox test_pw_publication_sha256 test_
 	test_pw_guest_call test_pw_x87 test_pw_x87_native test_pw_audio_ps5 test_pw_audio_in_ps5 test_pw_audio_mix test_pw_audio_route test_pw_audio_capture test_pw_audio_endpoints test_pw_agc_submit_lifecycle \
 	test_pw_videoout_layout test_pw_videoout_tile test_pw_pad_ps5 test_pw_rumble test_pw_pad_players test_pw_data_mount \
 	test_pw_data_mount_native test_pw_lapy_elevation test_pw_file_limits \
-	test_vk_present_interval test_vk_radv_profile
+	test_vk_present_interval test_vk_radv_profile test_pw_hud
 
 # The Python suites drive the built DBT tools and check the contracts the
 # host compiler cannot.
