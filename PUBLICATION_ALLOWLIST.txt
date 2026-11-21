@@ -830,6 +830,9 @@ wine/patches/1037-win32u-ps5-send-the-side-mouse-buttons.patch
 wine/patches/1038-win32u-ps5-send-the-title-input-from-one-thread.patch
 wine/patches/1039-win32u-ps5-drop-a-message-posted-to-the-desktop-window.patch
 tests/fixtures/wine_desktop_post.c
+wine/patches/1040-ntdll-search-a-program-s-local-folder-first-for-its-dlls.patch
+tests/test_wine_dotlocal.py
+tests/wine_dotlocal.c
 wine/ps5/pw_nsiproxy_libc.c
 tests/test_pw_nsiproxy_libc.c
 wine/patches/0985-ntdll-ps5-start-hosted-drivers-without-thread-attach.patch

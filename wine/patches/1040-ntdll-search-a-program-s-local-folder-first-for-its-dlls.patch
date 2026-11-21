@@ -1,0 +1,157 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Sat, 21 Nov 2026 12:00:00 +0100
+Subject: [PATCH] ntdll: Search a program's .local folder first for its DLLs.
+
+Windows' DLL redirection ("DotLocal"): when a folder named after the
+program plus ".local" (app.exe.local) sits beside it, a DLL named without
+a path is looked for there before the usual search path. Known DLLs are
+not redirected, and a program with its own manifest ignores the folder.
+Some launchers built with MinGW Qt ship every DLL they import in that
+folder and none beside the program, so without it Wine stops at their
+imports with STATUS_DLL_NOT_FOUND (c0000135).
+
+The folder is found once, after the process activation context is set
+up, and searched in find_dll_file() after the activation context, the
+loaded modules and the known DLLs, under the same WoW64 file system
+redirection as the search path. An image there for another architecture
+gives way to a copy in the search path, or fails as a bad format, as it
+does in the search path. Not covered: a .local file rather than a
+folder, and redirection of a DLL named with a full path.
+---
+ dlls/ntdll/actctx.c     |  7 ++++++
+ dlls/ntdll/loader.c     | 49 +++++++++++++++++++++++++++++++++++++++++
+ dlls/ntdll/ntdll_misc.h |  1 +
+ 3 files changed, 57 insertions(+)
+
+diff --git a/dlls/ntdll/actctx.c b/dlls/ntdll/actctx.c
+--- a/dlls/ntdll/actctx.c
++++ b/dlls/ntdll/actctx.c
+@@ -5264,6 +5264,13 @@ static const WCHAR *find_app_settings( ACTIVATION_CONTEXT *actctx, const WCHAR *
+     return NULL;
+ }
+ 
++/* whether the current process started with its own activation context: a manifest
++ * of its own, embedded or beside it, that Wine could use */
++BOOL actctx_process_has_manifest(void)
++{
++    return process_actctx != &system_actctx;
++}
++
+ /* initialize the activation context for the current process */
+ void actctx_init(void)
+ {
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -97,6 +97,7 @@ static UNICODE_STRING dll_directory;  /* extra path for LdrSetDllDirectory */
+ static UNICODE_STRING system_dll_path; /* path to search for system dependency dlls */
+ static DWORD default_search_flags;  /* default flags set by LdrSetDefaultDllDirectories */
+ static WCHAR *default_load_path;    /* default dll search path */
++static WCHAR *dotlocal_path;        /* the program's <name>.local folder, searched first */
+ static HANDLE known_dlls_ntdir;  /* NT directory containing known dlls sections */
+ 
+ struct dll_dir_entry
+@@ -3296,6 +3297,41 @@ done:
+     return status;
+ }
+ 
++/***********************************************************************
++ *	init_dotlocal_path
++ *
++ * DLL redirection ("DotLocal"): a folder beside the program named after it
++ * plus ".local" (app.exe.local) is searched first for a DLL named without a
++ * path. As on Windows, a program with its own manifest ignores it.
++ */
++static void init_dotlocal_path(void)
++{
++    const UNICODE_STRING *image = &NtCurrentTeb()->Peb->ProcessParameters->ImagePathName;
++    ULONG len = image->Length / sizeof(WCHAR);
++    FILE_BASIC_INFORMATION info;
++    OBJECT_ATTRIBUTES attr;
++    UNICODE_STRING nt_name;
++    NTSTATUS status;
++    WCHAR *path;
++
++    if (!len || actctx_process_has_manifest()) return;
++    if (!(path = RtlAllocateHeap( GetProcessHeap(), 0, (len + 7) * sizeof(WCHAR) ))) return;
++    memcpy( path, image->Buffer, len * sizeof(WCHAR) );
++    wcscpy( path + len, L".local" );
++    /* search_dll_file() takes a list separated by semicolons */
++    if (wcschr( path, ';' ) || !RtlDosPathNameToNtPathName_U( path, &nt_name, NULL, NULL )) goto failed;
++    InitializeObjectAttributes( &attr, &nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
++    status = NtQueryAttributesFile( &attr, &info );
++    RtlFreeUnicodeString( &nt_name );
++    if (status || !(info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY)) goto failed;
++    TRACE( "searching %s first\n", debugstr_w(path) );
++    dotlocal_path = path;
++    return;
++
++failed:
++    RtlFreeHeap( GetProcessHeap(), 0, path );
++}
++
+ /***********************************************************************
+  *	find_dll_file
+  *
+@@ -3308,6 +3344,7 @@ static NTSTATUS find_dll_file( const WCHAR *load_path, const WCHAR *libname, UNI
+     WCHAR *fullname = NULL;
+     NTSTATUS status;
+     ULONG wow64_old_value = 0;
++    BOOL try_dotlocal = FALSE, dotlocal_image = FALSE;
+ 
+     *pwm = NULL;
+     *redirected = FALSE;
+@@ -3339,15 +3376,25 @@ static NTSTATUS find_dll_file( const WCHAR *load_path, const WCHAR *libname, UNI
+                 return STATUS_DLL_NOT_FOUND;
+             }
+             if (!open_known_dll( libname, nt_name, pwm, mapping, image_info, id )) return STATUS_SUCCESS;
++            try_dotlocal = dotlocal_path != NULL;
+         }
+     }
+ 
+     /* Win 7/2008R2 and up seem to re-enable WoW64 FS redirection when loading libraries */
+     RtlWow64EnableFsRedirectionEx( 0, &wow64_old_value );
+ 
++    if (try_dotlocal)
++    {
++        status = search_dll_file( dotlocal_path, libname, nt_name, pwm, mapping, image_info, id );
++        /* an image for another architecture there counts as one found, as in the search path */
++        if (status == STATUS_NOT_SUPPORTED) dotlocal_image = TRUE;
++        else if (status != STATUS_DLL_NOT_FOUND) goto done;
++    }
++
+     if (RtlDetermineDosPathNameType_U( libname ) == RtlPathTypeRelative)
+     {
+         status = search_dll_file( load_path, libname, nt_name, pwm, mapping, image_info, id );
++        if (status == STATUS_DLL_NOT_FOUND && dotlocal_image) status = STATUS_NOT_SUPPORTED;
+         switch (status)
+         {
+         case STATUS_NOT_SUPPORTED:
+@@ -3362,6 +3409,7 @@ static NTSTATUS find_dll_file( const WCHAR *load_path, const WCHAR *libname, UNI
+     else if (!(status = RtlDosPathNameToNtPathName_U_WithStatus( libname, nt_name, NULL, NULL )))
+         status = open_dll_file( nt_name, pwm, mapping, image_info, id );
+ 
++done:
+     if (status == STATUS_NOT_SUPPORTED) status = STATUS_INVALID_IMAGE_FORMAT;
+ 
+     RtlFreeHeap( GetProcessHeap(), 0, fullname );
+@@ -4662,6 +4710,7 @@ void loader_init( CONTEXT *context, void **entry )
+         LdrGetProcedureAddress( kernel32->ldr.DllBase, &ctrl_routine, 0, (void **)&pCtrlRoutine );
+ 
+         actctx_init();
++        init_dotlocal_path();
+         locale_init();
+         if (needs_elevation())
+             elevate_token();
+diff --git a/dlls/ntdll/ntdll_misc.h b/dlls/ntdll/ntdll_misc.h
+--- a/dlls/ntdll/ntdll_misc.h
++++ b/dlls/ntdll/ntdll_misc.h
+@@ -83,6 +83,7 @@ extern void set_native_thread_name( DWORD tid, const char *name );
+ extern void loader_init( CONTEXT *context, void **entry );
+ extern void version_init(void);
+ extern void actctx_init(void);
++extern BOOL actctx_process_has_manifest(void);
+ extern void locale_init(void);
+ extern void init_user_process_params(void);
+ extern ULONG get_resource_lcids( LANGID *langs, ULONG size, LCID lcid );
