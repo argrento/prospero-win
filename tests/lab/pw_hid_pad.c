@@ -17,7 +17,11 @@
  *   cutoff;
  * - opening a HID device asked the title for controllers 1..3;
  * - a second controller is a second device only while it is connected, reads
- *   apart from the first, and comes back after going.
+ *   apart from the first, and comes back after going;
+ * - a window that asked for HID device notifications is told when the second
+ *   controller comes and goes (DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE),
+ *   and Windows.Gaming.Input lists it once it came, hosted as well: a game
+ *   that looks for a new controller only when told finds one.
  * Exit status 0 only when every check passed. */
 #define DIRECTINPUT_VERSION 0x0800
 #define COBJMACROS
@@ -25,6 +29,7 @@
 #include <initguid.h>
 #include <dinput.h>
 #include <mmsystem.h>
+#include <dbt.h>
 #include <roapi.h>
 #include <winstring.h>
 #define WIDL_using_Windows_Foundation
@@ -250,6 +255,43 @@ static void set_extra(int slot,int connected,unsigned buttons)
 static GUID extra_instances[8];
 static int extra_found;
 
+/* GUID_DEVINTERFACE_HID */
+static const GUID hid_class={0x4d1e55b2,0xf16f,0x11cf,{0x88,0xcb,0x00,0x11,0x11,0x00,0x00,0x30}};
+static int hid_arrivals,hid_removals;
+
+/* A message-only window that asked for HID device notifications, as SDL's joystick code makes. */
+static LRESULT CALLBACK listener_proc(HWND window,UINT message,WPARAM wparam,LPARAM lparam)
+{
+    const DEV_BROADCAST_DEVICEINTERFACE_W *iface=(const DEV_BROADCAST_DEVICEINTERFACE_W *)lparam;
+
+    if(message!=WM_DEVICECHANGE)return DefWindowProcW(window,message,wparam,lparam);
+    if(iface && iface->dbcc_devicetype==DBT_DEVTYP_DEVICEINTERFACE && IsEqualGUID(&iface->dbcc_classguid,&hid_class)) {
+        if(wparam==DBT_DEVICEARRIVAL)hid_arrivals++;
+        if(wparam==DBT_DEVICEREMOVECOMPLETE)hid_removals++;
+    }
+    return TRUE;
+}
+
+/* Handles this thread's messages for ms milliseconds: a notification is sent to the listener, which only a
+ * thread that handles its messages receives. */
+static void pump(DWORD ms)
+{
+    DWORD start=GetTickCount();
+    MSG message;
+
+    do {
+        while(PeekMessageW(&message,NULL,0,0,PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
+        MsgWaitForMultipleObjects(0,NULL,FALSE,20,QS_ALLINPUT);
+    } while(GetTickCount()-start<ms);
+}
+
+/* Waits up to a few seconds for *counter to reach want. */
+static int notified(const int *counter,int want)
+{
+    for(int i=0;i<40 && *counter<want;i++)pump(100);
+    return *counter;
+}
+
 static BOOL CALLBACK enum_extra(const DIDEVICEINSTANCEW *instance,void *context)
 {
     (void)context;
@@ -299,8 +341,7 @@ static void check_players_elsewhere(void)
     }
     set_extra(1,1,0);
 
-    /* A hosted game has no plugplay service: Windows.Gaming.Input looks once, at its start (check_at_start). */
-    if(GetEnvironmentVariableA("WINE_NTOSKRNL_HOSTED",NULL,0))return;
+    /* Windows.Gaming.Input looked at the start (check_wgi), before this controller came: it lists it only if told. */
     WindowsCreateString(name,ARRAYSIZE(name)-1,&string);
     RoGetActivationFactory(string,&IID_IGamepadStatics,(void **)&statics);
     WindowsDeleteString(string);
@@ -388,7 +429,7 @@ static int count_until(int want)
         extra_found=0;
         IDirectInput8_EnumDevices(dinput,DI8DEVCLASS_GAMECTRL,enum_extra,NULL,DIEDFL_ATTACHEDONLY);
         if(extra_found==want)break;
-        Sleep(200);
+        pump(200);
     }
     return extra_found;
 }
@@ -397,6 +438,8 @@ static void check_players(HWND window)
 {
     char path[MAX_PATH+8],seen[256];
     IDirectInputDevice8W *devices[2]={NULL,NULL};
+    HDEVNOTIFY notification=NULL;
+    HWND listener=NULL;
     DIJOYSTATE2 state[2];
     unsigned mask=0;
     FILE *f;
@@ -415,11 +458,26 @@ static void check_players(HWND window)
     snprintf(seen,sizeof(seen),"%d devices",count);
     check(count==1,"a controller that is not connected has no device",seen);
 
+    {
+        DEV_BROADCAST_DEVICEINTERFACE_W filter={sizeof(filter),DBT_DEVTYP_DEVICEINTERFACE,0,{0},{0}};
+        WNDCLASSW cls={0};
+
+        cls.lpfnWndProc=listener_proc;cls.lpszClassName=L"pw_hid_pad_listener";
+        RegisterClassW(&cls);
+        listener=CreateWindowW(cls.lpszClassName,NULL,0,0,0,0,0,HWND_MESSAGE,NULL,NULL,NULL);
+        filter.dbcc_classguid=hid_class;
+        notification=listener?RegisterDeviceNotificationW(listener,&filter,DEVICE_NOTIFY_WINDOW_HANDLE):NULL;
+        check(notification!=NULL,"a window registers for HID device notifications","");
+    }
+
+    hid_arrivals=hid_removals=0;
     set_extra(1,1,0);
     count=count_until(2);
     snprintf(seen,sizeof(seen),"%d devices",count);
     check(count==2,"a connected second controller is a second device",seen);
-    if(count!=2)return;
+    snprintf(seen,sizeof(seen),"%d arrivals",notified(&hid_arrivals,1));
+    check(hid_arrivals>=1,"the registered window is told the second controller came",seen);
+    if(count!=2)goto done;
     check(memcmp(&extra_instances[0],&extra_instances[1],sizeof(GUID))!=0,"the two devices have their own instances","");
 
     for(int i=0;i<2;i++) {
@@ -472,14 +530,25 @@ done:
     for(int i=0;i<2;i++)
         if(devices[i]) { IDirectInputDevice8_Unacquire(devices[i]); IDirectInputDevice8_Release(devices[i]); }
 
+    pump(500);   /* what the earlier comings and goings sent */
+    hid_arrivals=hid_removals=0;
     set_extra(1,0,0);
     count=count_until(1);
     snprintf(seen,sizeof(seen),"%d devices",count);
     check(count==1,"the device goes with its controller",seen);
+    snprintf(seen,sizeof(seen),"%d removals",notified(&hid_removals,1));
+    check(hid_removals>=1,"the registered window is told the second controller went",seen);
+    if(notification)UnregisterDeviceNotification(notification);
+    pump(500);
+    hid_arrivals=hid_removals=0;
     set_extra(1,1,0);
     count=count_until(2);
     snprintf(seen,sizeof(seen),"%d devices",count);
     check(count==2,"a controller that comes back has a device again",seen);
+    pump(1000);
+    snprintf(seen,sizeof(seen),"%d arrivals",hid_arrivals);
+    check(hid_arrivals==0,"a window that is no longer registered is not told",seen);
+    if(listener)DestroyWindow(listener);
     check_players_elsewhere();
     set_extra(1,0,0);
     count_until(1);

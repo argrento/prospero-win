@@ -844,3 +844,5 @@ wine/patches/0985-ntdll-ps5-start-hosted-drivers-without-thread-attach.patch
 native/pw_rumble.c
 native/pw_rumble.h
 tests/test_pw_rumble.c
+wine/patches/1041-sechost-deliver-hosted-drivers-device-events-in-the-process.patch
+tests/test_wine_device_events.py

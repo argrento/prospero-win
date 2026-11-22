@@ -1,0 +1,313 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Sun, 22 Nov 2026 12:00:00 +0100
+Subject: [PATCH] sechost: Deliver hosted drivers' device events in the
+ process.
+
+A process that runs its own drivers (wine_ntoskrnl_host_start, patch
+0952) has no plug and play service. ntoskrnl's device events went to that
+service over RPC and were lost, and sechost's notification thread gave up
+when it could not reach it. A device that came or went while a program ran
+was never announced to the windows and callbacks that asked for device
+notifications: DBT_DEVICEARRIVAL and DBT_DEVICEREMOVECOMPLETE never came.
+Programs that look for a new controller only when told (SDL's joystick
+code, Windows.Gaming.Input, many engines) never found one connected after
+they started.
+
+Before its drivers start, a hosting ntoskrnl now finds sechost's new
+__wine_queue_device_event, calls it once to say that device events come
+from this process, and from then on hands it each event in place of the
+RPC. sechost queues the event for the registrations made so far, and its
+notification thread delivers the queue through the same filters and
+callbacks as the service's events. The driver's thread only queues: a
+window callback runs on the notification thread, so a program that opens
+the new device from its handler does not wait on the driver loop that is
+sending the event. Anywhere else nothing changes.
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c         |  14 ++++
+ dlls/ntoskrnl.exe/ntoskrnl_private.h |   2 +
+ dlls/ntoskrnl.exe/pnp.c              |   7 ++
+ dlls/sechost/sechost.spec            |   1 +
+ dlls/sechost/service.c               | 143 ++++++++++++++++++++++++++++++-----
+ 5 files changed, 149 insertions(+), 18 deletions(-)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index bdfcbed..f782258 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -4396,6 +4396,8 @@ static const GUID GUID_DEVINTERFACE_WINEXINPUT = {0x6c53d5fd, 0x6480, 0x440f, {0
+ static const GUID hid_interface_class = {0x4d1e55b2, 0xf16f, 0x11cf, {0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30}};
+ static const GUID *host_gamepad_class = &GUID_DEVINTERFACE_WINEXINPUT;
+ 
++void (WINAPI *hosted_queue_device_event)( const WCHAR *path, DWORD code, const void *data, unsigned int size );
++
+ void hosted_interface_enabled( const GUID *interface_class )
+ {
+     if (host_gamepad && IsEqualGUID( interface_class, host_gamepad_class ) &&
+@@ -4444,6 +4446,18 @@ NTSTATUS CDECL wine_ntoskrnl_host_start( const WCHAR *driver_name, DWORD timeout
+             host_gamepads = pads[0] - '0';
+     }
+ 
++    /* There is no plug and play service to send device events to: the programs that asked to be told are in this
++     * process, and sechost tells them. Found here, before any driver runs, and not from a driver's thread, which
++     * must not wait for the loader. */
++    if (!hosted_queue_device_event)
++    {
++        HMODULE sechost = LoadLibraryW( L"sechost.dll" );
++
++        if (sechost) hosted_queue_device_event = (void *)GetProcAddress( sechost, "__wine_queue_device_event" );
++        if (hosted_queue_device_event) hosted_queue_device_event( NULL, 0, NULL, 0 );
++        else WARN( "programs will not be told when devices come or go\n" );
++    }
++
+     GetSystemDirectoryW( path, MAX_PATH );
+     wcscat( path, L"\\drivers" );
+     AddDllDirectory( path );
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl_private.h b/dlls/ntoskrnl.exe/ntoskrnl_private.h
+index 694948f..2f61990 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl_private.h
++++ b/dlls/ntoskrnl.exe/ntoskrnl_private.h
+@@ -139,5 +139,7 @@ struct wine_device
+ };
+ /* Hosted mode (wine_ntoskrnl_host_start): a device interface was enabled in this process. */
+ void hosted_interface_enabled( const GUID *interface_class );
++/* sechost's, when the drivers run in this process: it delivers their device events (wine_ntoskrnl_host_start). */
++extern void (WINAPI *hosted_queue_device_event)( const WCHAR *path, DWORD code, const void *data, unsigned int size );
+ 
+ #endif
+diff --git a/dlls/ntoskrnl.exe/pnp.c b/dlls/ntoskrnl.exe/pnp.c
+index d4bc472..a201853 100644
+--- a/dlls/ntoskrnl.exe/pnp.c
++++ b/dlls/ntoskrnl.exe/pnp.c
+@@ -1044,6 +1044,13 @@ static LONG WINAPI rpc_filter( EXCEPTION_POINTERS *eptr )
+ 
+ static void send_devicechange( const WCHAR *path, DWORD code, void *data, unsigned int size )
+ {
++    /* Drivers hosted in an ordinary process have no plug and play service to tell. */
++    if (hosted_queue_device_event)
++    {
++        hosted_queue_device_event( path, code, data, size );
++        return;
++    }
++
+     __TRY
+     {
+         plugplay_send_event( path, code, data, size );
+diff --git a/dlls/sechost/sechost.spec b/dlls/sechost/sechost.spec
+index de4f1f3..8ee0127 100644
+--- a/dlls/sechost/sechost.spec
++++ b/dlls/sechost/sechost.spec
+@@ -117,6 +117,7 @@
+ @ stub I_ScSendTSMessage
+ @ stdcall I_ScUnregisterDeviceNotification(ptr)
+ @ stub I_ScValidatePnPService
++@ stdcall __wine_queue_device_event(ptr long ptr long)
+ @ stub LocalGetConditionForString
+ @ stub LocalGetReferencedTokenTypesForCondition
+ @ stub LocalGetStringForCondition
+diff --git a/dlls/sechost/service.c b/dlls/sechost/service.c
+index f05fd2d..7f1143c 100644
+--- a/dlls/sechost/service.c
++++ b/dlls/sechost/service.c
+@@ -1988,9 +1988,29 @@ struct device_notify
+     WCHAR *path;
+     HANDLE handle;
+     device_notify_callback callback;
++    UINT64 serial;  /* registrations are numbered in order */
+     DEV_BROADCAST_HDR header[]; /* variable size */
+ };
+ 
++static UINT64 device_notify_serial;
++
++/* Device events from drivers that run in this process (ntoskrnl's
++ * wine_ntoskrnl_host_start), for a process with no plug and play service:
++ * ntoskrnl turns this on before its drivers start and queues their events
++ * here, and the notification thread delivers them in place of the service's. */
++struct local_device_event
++{
++    struct list entry;
++    DWORD code;
++    UINT64 serial;  /* the last registration when it was queued */
++    WCHAR *path;
++    BYTE data[];
++};
++
++static BOOL local_device_events_on;
++static struct list local_device_events = LIST_INIT(local_device_events);
++static HANDLE local_device_queued;
++
+ C_ASSERT( sizeof(struct device_notify) == offsetof(struct device_notify, header[0]) );
+ 
+ static struct device_notify *device_notify_copy( struct device_notify *notify, DEV_BROADCAST_HDR *header )
+@@ -2033,22 +2053,78 @@ static BOOL notification_filter_matches( DEV_BROADCAST_HDR *filter, const WCHAR
+     return TRUE;
+ }
+ 
++/* Calls the callbacks of the registrations an event matches, up to the given one: a program that registers
++ * after an event was queued was not there when it happened. */
++static void dispatch_device_event( DWORD code, const WCHAR *path, DEV_BROADCAST_HDR *header, UINT64 serial )
++{
++    struct device_notify *notify, *event, *next;
++    struct list events = LIST_INIT(events);
++
++    /* Make a copy to avoid a hang if a callback tries to register or unregister for notifications. */
++    EnterCriticalSection( &service_cs );
++    LIST_FOR_EACH_ENTRY( notify, &device_notify_list, struct device_notify, entry )
++    {
++        if (notify->serial > serial) continue;
++        if (!notification_filter_matches( notify->header, notify->path, header, path )) continue;
++        if (!(event = device_notify_copy( notify, header ))) break;
++        list_add_tail( &events, &event->entry );
++    }
++    LeaveCriticalSection(&service_cs);
++
++    LIST_FOR_EACH_ENTRY_SAFE( event, next, &events, struct device_notify, entry )
++    {
++        event->callback( event->handle, code, event->header );
++        list_remove( &event->entry );
++        free( event );
++    }
++}
++
++/* Delivers the events this process's own drivers queue (__wine_queue_device_event), for as long as the process
++ * runs. */
++static DWORD local_device_notify_loop(void)
++{
++    struct local_device_event *event;
++    struct list *head;
++
++    while (!WaitForSingleObject( local_device_queued, INFINITE ))
++    {
++        for (;;)
++        {
++            EnterCriticalSection( &service_cs );
++            if ((head = list_head( &local_device_events ))) list_remove( head );
++            LeaveCriticalSection( &service_cs );
++            if (!head) break;
++
++            event = LIST_ENTRY( head, struct local_device_event, entry );
++            dispatch_device_event( event->code, event->path, (DEV_BROADCAST_HDR *)event->data, event->serial );
++            free( event->path );
++            free( event );
++        }
++    }
++    ERR( "wait failed, error %lu\n", GetLastError() );
++    return 1;
++}
++
+ static DWORD WINAPI device_notify_proc( void *arg )
+ {
+     WCHAR endpoint[] = L"\\pipe\\wine_plugplay";
+     WCHAR protseq[] = L"ncacn_np";
+     RPC_WSTR binding_str;
+     DWORD err = ERROR_SUCCESS;
+-    struct device_notify *notify, *event, *next;
+-    struct list events = LIST_INIT(events);
+     plugplay_rpc_handle handle = NULL;
+     DWORD code = 0;
+     unsigned int size;
+     WCHAR *path;
+     BYTE *buf;
++    BOOL local;
+ 
+     SetThreadDescription( GetCurrentThread(), L"wine_sechost_device_notify" );
+ 
++    EnterCriticalSection( &service_cs );
++    local = local_device_events_on;
++    LeaveCriticalSection( &service_cs );
++    if (local) return local_device_notify_loop();
++
+     if ((err = RpcStringBindingComposeW( NULL, protseq, NULL, endpoint, NULL, &binding_str )))
+     {
+         ERR("RpcStringBindingCompose() failed, error %#lx\n", err);
+@@ -2074,6 +2150,12 @@ static DWORD WINAPI device_notify_proc( void *arg )
+ 
+     if (!handle)
+     {
++        RpcBindingFree( &plugplay_binding_handle );
++        /* Started before the drivers this process hosts turned their events on. */
++        EnterCriticalSection( &service_cs );
++        local = local_device_events_on;
++        LeaveCriticalSection( &service_cs );
++        if (local) return local_device_notify_loop();
+         ERR("failed to open RPC handle, error %lu\n", err);
+         return 1;
+     }
+@@ -2099,22 +2181,7 @@ static DWORD WINAPI device_notify_proc( void *arg )
+             break;
+         }
+ 
+-        /* Make a copy to avoid a hang if a callback tries to register or unregister for notifications. */
+-        EnterCriticalSection( &service_cs );
+-        LIST_FOR_EACH_ENTRY( notify, &device_notify_list, struct device_notify, entry )
+-        {
+-            if (!notification_filter_matches( notify->header, notify->path, (DEV_BROADCAST_HDR *)buf, path )) continue;
+-            if (!(event = device_notify_copy( notify, (DEV_BROADCAST_HDR *)buf ))) break;
+-            list_add_tail( &events, &event->entry );
+-        }
+-        LeaveCriticalSection(&service_cs);
+-
+-        LIST_FOR_EACH_ENTRY_SAFE( event, next, &events, struct device_notify, entry )
+-        {
+-            event->callback( event->handle, code, event->header );
+-            list_remove( &event->entry );
+-            free( event );
+-        }
++        dispatch_device_event( code, path, (DEV_BROADCAST_HDR *)buf, ~(UINT64)0 );
+ 
+         MIDL_user_free(buf);
+         MIDL_user_free(path);
+@@ -2133,6 +2200,45 @@ static DWORD WINAPI device_notify_proc( void *arg )
+     return 0;
+ }
+ 
++/******************************************************************************
++ *     __wine_queue_device_event   (sechost.@)
++ *
++ * For ntoskrnl when it runs drivers in an ordinary process with no plug and
++ * play service (wine_ntoskrnl_host_start). Called once with no data before the
++ * drivers start: device events then come only from this process, and the
++ * notification thread waits for them instead of for the service. Each later
++ * call queues one event for the registrations made so far. The notification
++ * thread delivers it, never the caller: a driver's thread must not wait on a
++ * window that may be waiting on that driver. Without a registration the event
++ * is dropped.
++ */
++void WINAPI __wine_queue_device_event( const WCHAR *path, DWORD code, const void *data, unsigned int size )
++{
++    struct local_device_event *event;
++
++    EnterCriticalSection( &service_cs );
++    if (!data)
++    {
++        if (!local_device_queued) local_device_queued = CreateEventW( NULL, FALSE, FALSE, NULL );
++        if (local_device_queued) local_device_events_on = TRUE;
++        else ERR( "no event, error %lu: device events are lost\n", GetLastError() );
++    }
++    else if (local_device_events_on && size >= sizeof(DEV_BROADCAST_HDR) && !list_empty( &device_notify_list ) &&
++             (event = malloc( offsetof(struct local_device_event, data[size]) )))
++    {
++        if ((event->path = wcsdup( path ? path : L"" )))
++        {
++            event->code = code;
++            event->serial = device_notify_serial;
++            memcpy( event->data, data, size );
++            list_add_tail( &local_device_events, &event->entry );
++            SetEvent( local_device_queued );
++        }
++        else free( event );
++    }
++    LeaveCriticalSection( &service_cs );
++}
++
+ /******************************************************************************
+  *     I_ScRegisterDeviceNotification   (sechost.@)
+  */
+@@ -2172,6 +2278,7 @@ HDEVNOTIFY WINAPI I_ScRegisterDeviceNotification( HANDLE handle, DEV_BROADCAST_H
+     }
+ 
+     EnterCriticalSection( &service_cs );
++    notify->serial = ++device_notify_serial;
+     list_add_tail( &device_notify_list, &notify->entry );
+ 
+     if (!device_notify_thread)
