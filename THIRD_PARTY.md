@@ -38,6 +38,11 @@ from [Wine](https://gitlab.winehq.org/wine/wine), LGPL-2.1-or-later, with
 prospero-win's patches from its `wine/patches` directory applied.
 `wowprospero.dll` and `wowprospero.prx` are prospero-win's own code under
 the same licence.
+`amd_ags_x64.dll` (Wine patch 1042) is the AMD GPU Services module of
+[Proton's Wine](https://github.com/ValveSoftware/wine) (branch proton_10.0),
+by Paul Gofman and others for CodeWeavers, under the same licence; its
+`amd_ags.h` is AMD's AGS SDK header, under the MIT licence its notice
+carries.
 
 Wine includes code from other projects (zlib, libpng, FAudio, the LLVM C++
 runtime, Unicode data and more). `LICENSES/wine/` holds Wine's `LICENSE`,

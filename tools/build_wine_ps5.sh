@@ -147,6 +147,8 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # fails (patch 1018).
 # sechost: it delivers the device events of the drivers the game hosts, which
 # ntoskrnl queues there (patch 1041); the two change together.
+# amd_ags_x64 (x86_64 only, as the games that load it): a new module, the AMD
+# GPU Services library on Vulkan (patch 1042).
 PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan kernelbase ntoskrnl.exe winebus.sys hidclass.sys setupapi gdi32 wined3d rtworkq msvcp80 msvcp90 dnsapi iphlpapi sechost"
 PE_MODULES="$PE_MODULES xaudio2_0 xaudio2_1 xaudio2_2 xaudio2_3 xaudio2_4 xaudio2_5 xaudio2_6 xaudio2_7 xaudio2_8 xaudio2_9 xactengine2_0 xactengine2_4 xactengine2_7 xactengine2_9 xactengine3_0 xactengine3_1 xactengine3_2 xactengine3_3 xactengine3_4 xactengine3_5 xactengine3_6 xactengine3_7"
 PE_MODULES="$PE_MODULES d3dx9_24 d3dx9_25 d3dx9_26 d3dx9_27 d3dx9_28 d3dx9_29 d3dx9_30 d3dx9_31 d3dx9_32 d3dx9_33 d3dx9_34 d3dx9_35 d3dx9_36 d3dx9_37 d3dx9_38 d3dx9_39 d3dx9_40 d3dx9_41 d3dx9_42 d3dx9_43"
@@ -552,7 +554,7 @@ pe_targets=
 for arch in i386 x86_64; do
     mkdir -p "$work/pe/$arch-windows"
     modules="$PE_MODULES"
-    [ "$arch" != x86_64 ] || modules="$modules wow64 wow64win"
+    [ "$arch" != x86_64 ] || modules="$modules wow64 wow64win amd_ags_x64"
     for module in $modules; do
         file=$module
         case $module in *.*) ;; *) file=$module.dll ;; esac

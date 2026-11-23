@@ -281,6 +281,7 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_wine_mutex_fast.py
 	CC="$(CC)" python3 tests/test_wine_hid_slots.py
 	python3 tests/test_wine_device_events.py
+	python3 tests/test_wine_amd_ags.py
 	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_wine_shared_mutex_word.py
 	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_wine_shared_sync_word.py
 	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_wine_shared_sync_server.py
