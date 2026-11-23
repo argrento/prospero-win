@@ -957,6 +957,14 @@ game (PE) -> DXVK d3d11/dxgi/d3d9/d3d8/d3d10core (PE, beside the game) -> winevu
   than one AGC submission can"). Order of the Sinking Star (vkd3d-proton)
   records about 75,000 of them in its first frame and stayed on a gray
   screen.
+- **Device ID.** Until PS5_Mesa `1abf9bf` RADV's PS5 winsys reported PCI
+  device ID 0, so Vulkan's `deviceID` and, through DXVK, DXGI's `DeviceId`
+  were 0, which Windows games read as no GPU. It now reports `0x13fe`, the
+  AMD BC-250's (the GC 10.1.3 chip whose traits the winsys takes; the
+  console's own ID is not known). UNCHARTED: Legacy of Thieves Collection
+  saves the ID with its display settings and, reading back 0, asked on every
+  start whether to reset them. A Vulkan pipeline cache saved before carries
+  device ID 0 in its header and is built again once.
 - **DLLs.** DXVK's DLLs go beside the game, and its profile sets
   `dll_overrides` (`d3d11,dxgi=n`, `d3d9=n`, `d3d8,d3d9=n` or
   `d3d10core,d3d11,dxgi=n`). The unmodified Win32-WSI DXVK build is the one
